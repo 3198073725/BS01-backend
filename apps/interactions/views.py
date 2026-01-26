@@ -8,7 +8,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import permissions, status, generics, serializers
-from rest_framework.exceptions import ValidationError, PermissionDenied
+from rest_framework.exceptions import ValidationError, PermissionDenied, NotFound
 from django.db import IntegrityError
 from django.db.models import Q, Exists, OuterRef, Value, IntegerField, Case, When, Count
 
@@ -210,7 +210,11 @@ class FollowingListView(generics.ListAPIView):
         return ctx
 
 def _media_url(request, rel: str) -> str:
-    base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+    # 优先使用请求 Host，避免 SITE_URL 与前端 Host 不一致导致跨域或 127.0.0.1 无法访问
+    try:
+        base = (request.build_absolute_uri('/') if request else (getattr(settings, 'SITE_URL', '') or '')).rstrip('/')
+    except Exception:
+        base = (getattr(settings, 'SITE_URL', '') or '').rstrip('/')
     media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
     if media.startswith('http://') or media.startswith('https://'):
         return f"{media}/{rel}"
@@ -276,7 +280,11 @@ class LikesListView(_BaseUserList):
         rows = list(p.paginate_queryset(qs, request, view=self))
         # 批量取视频（仅必要字段）
         vid_ids = [r.video_id for r in rows]
-        vmap = {str(v.id): v for v in Video.objects.filter(id__in=vid_ids).only('id','title','view_count','like_count','thumbnail','thumbnail_f')}
+        allow_all = bool(viewer and (str(viewer.id) == str(user.id) or getattr(viewer, 'is_staff', False)))
+        base_qs = Video.objects.filter(id__in=vid_ids).only('id','title','view_count','like_count','thumbnail','thumbnail_f')
+        if not allow_all:
+            base_qs = base_qs.filter(visibility='public', status='published')
+        vmap = {str(v.id): v for v in base_qs}
         items = []
         for r in rows:
             v = vmap.get(str(r.video_id))
@@ -327,7 +335,11 @@ class FavoritesListView(_BaseUserList):
         qs = Favorite.objects.filter(user=user).order_by('-created_at')
         rows = list(p.paginate_queryset(qs, request, view=self))
         vid_ids = [r.video_id for r in rows]
-        vmap = {str(v.id): v for v in Video.objects.filter(id__in=vid_ids).only('id','title','view_count','like_count','thumbnail','thumbnail_f')}
+        allow_all = bool(viewer and (str(viewer.id) == str(user.id) or getattr(viewer, 'is_staff', False)))
+        base_qs = Video.objects.filter(id__in=vid_ids).only('id','title','view_count','like_count','thumbnail','thumbnail_f')
+        if not allow_all:
+            base_qs = base_qs.filter(visibility='public', status='published')
+        vmap = {str(v.id): v for v in base_qs}
         items = []
         for r in rows:
             v = vmap.get(str(r.video_id))
@@ -358,7 +370,11 @@ class WatchLaterListView(_BaseUserList):
         qs = WatchLater.objects.filter(user=user).order_by('-created_at')
         rows = list(p.paginate_queryset(qs, request, view=self))
         vid_ids = [r.video_id for r in rows]
-        vmap = {str(v.id): v for v in Video.objects.filter(id__in=vid_ids).only('id','title','view_count','like_count','thumbnail','thumbnail_f')}
+        allow_all = bool(viewer and (str(viewer.id) == str(user.id) or getattr(viewer, 'is_staff', False)))
+        base_qs = Video.objects.filter(id__in=vid_ids).only('id','title','view_count','like_count','thumbnail','thumbnail_f')
+        if not allow_all:
+            base_qs = base_qs.filter(visibility='public', status='published')
+        vmap = {str(v.id): v for v in base_qs}
         items = []
         for r in rows:
             v = vmap.get(str(r.video_id))
@@ -389,7 +405,11 @@ class HistoryListView(_BaseUserList):
         qs = History.objects.filter(user=user).order_by('-created_at')
         rows = list(p.paginate_queryset(qs, request, view=self))
         vid_ids = [r.video_id for r in rows]
-        vmap = {str(v.id): v for v in Video.objects.filter(id__in=vid_ids).only('id','title','view_count','like_count','thumbnail','thumbnail_f')}
+        allow_all = bool(viewer and (str(viewer.id) == str(user.id) or getattr(viewer, 'is_staff', False)))
+        base_qs = Video.objects.filter(id__in=vid_ids).only('id','title','view_count','like_count','thumbnail','thumbnail_f')
+        if not allow_all:
+            base_qs = base_qs.filter(visibility='public', status='published')
+        vmap = {str(v.id): v for v in base_qs}
         items = []
         for r in rows:
             v = vmap.get(str(r.video_id))
@@ -486,6 +506,14 @@ class LikeToggleView(APIView):
         except Exception:
             raise ValidationError({'video_id': '格式不正确'})
         v = get_object_or_404(Video, pk=vid)
+        # 未发布视频不允许此操作
+        if getattr(v, 'status', '') != 'published':
+            raise NotFound('资源不存在')
+        # 私密视频仅作者/管理员可操作
+        if getattr(v, 'visibility', 'public') == 'private':
+            viewer = request.user
+            if (str(viewer.id) != str(v.user_id)) and (not getattr(viewer, 'is_staff', False)):
+                raise NotFound('资源不存在')
         obj = Like.objects.filter(user=request.user, video=v).first()
         liked = False
         if obj:
@@ -510,6 +538,14 @@ class FavoriteToggleView(APIView):
         if not vid:
             raise ValidationError({'video_id': '必填'})
         v = get_object_or_404(Video, pk=vid)
+        # 未发布视频不允许此操作
+        if getattr(v, 'status', '') != 'published':
+            raise NotFound('资源不存在')
+        # 私密视频仅作者/管理员可操作
+        if getattr(v, 'visibility', 'public') == 'private':
+            viewer = request.user
+            if (str(viewer.id) != str(v.user_id)) and (not getattr(viewer, 'is_staff', False)):
+                raise NotFound('资源不存在')
         obj = Favorite.objects.filter(user=request.user, video=v).first()
         favorited = False
         if obj:
@@ -535,6 +571,14 @@ class HistoryRecordView(APIView):
         if not vid:
             raise ValidationError({'video_id': '必填'})
         v = get_object_or_404(Video, pk=vid)
+        # 未发布视频不允许此操作
+        if getattr(v, 'status', '') != 'published':
+            raise NotFound('资源不存在')
+        # 私密视频仅作者/管理员可写入观看记录
+        if getattr(v, 'visibility', 'public') == 'private':
+            viewer = request.user
+            if (str(viewer.id) != str(v.user_id)) and (not getattr(viewer, 'is_staff', False)):
+                raise NotFound('资源不存在')
         prog = request.data.get('progress')
         cur = request.data.get('current')
         dur = request.data.get('duration')
@@ -631,11 +675,40 @@ class CommentSerializer(serializers.ModelSerializer):
         if not u:
             return None
         try:
+            # 构造绝对头像 URL（优先文件字段，再退回缩略或原图），并对以 / 开头的路径进行基址拼接
+            try:
+                req = self.context.get('request') if hasattr(self, 'context') else None
+            except Exception:
+                req = None
+            rel = (
+                getattr(getattr(u, 'profile_picture_f', None), 'name', None)
+                or getattr(u, 'profile_picture_thumb', None)
+                or getattr(u, 'profile_picture', None)
+            )
+            avatar = None
+            if rel:
+                try:
+                    s = str(rel)
+                except Exception:
+                    s = ''
+                if s.startswith('http://') or s.startswith('https://'):
+                    avatar = s
+                elif s.startswith('/'):
+                    try:
+                        base = (getattr(settings, 'SITE_URL', '') or (req.build_absolute_uri('/') if req else '')).rstrip('/')
+                    except Exception:
+                        base = ''
+                    avatar = f"{base}{s}" if base else s
+                else:
+                    try:
+                        avatar = _media_url(req, s)
+                    except Exception:
+                        avatar = s
             return {
                 'id': str(u.id),
                 'username': getattr(u, 'username', '') or '',
                 'display_name': getattr(u, 'display_name', '') or getattr(u, 'nickname', '') or '',
-                'avatar_url': getattr(u, 'profile_picture_thumb', '') or getattr(u, 'profile_picture', '') or '',
+                'avatar_url': avatar,
             }
         except Exception:
             return None
@@ -654,11 +727,19 @@ class CommentsListCreateView(APIView):
         vid = request.query_params.get('video_id')
         if not vid:
             raise ValidationError({'video_id': '缺少视频ID'})
+        # 私密视频仅作者/管理员可查看评论列表
+        v = get_object_or_404(Video, id=vid)
+        if getattr(v, 'status', '') != 'published':
+            raise NotFound('资源不存在')
+        viewer = request.user if (request.user and request.user.is_authenticated) else None
+        if getattr(v, 'visibility', 'public') == 'private':
+            if (not viewer) or (str(viewer.id) != str(v.user_id) and not getattr(viewer, 'is_staff', False)):
+                raise NotFound('资源不存在')
         p = StandardResultsSetPagination()
         qs = Comment.objects.filter(video_id=vid, parent__isnull=True).select_related('user').order_by('-created_at')
         qs = qs.annotate(replies_count=Count('replies'))
         page = p.paginate_queryset(qs, request, view=self)
-        ser = CommentSerializer(page, many=True)
+        ser = CommentSerializer(page, many=True, context={'request': request})
         return Response({'results': ser.data,
                          'page': p.page.number,
                          'page_size': p.get_page_size(request),
@@ -676,14 +757,24 @@ class CommentsListCreateView(APIView):
         if not content:
             raise ValidationError({'content': '内容不能为空'})
         video = get_object_or_404(Video, id=video_id)
+        if getattr(video, 'status', '') != 'published':
+            raise NotFound('资源不存在')
+        # 私密视频仅作者/管理员可评论
+        if getattr(video, 'visibility', 'public') == 'private':
+            viewer = request.user
+            if (str(viewer.id) != str(video.user_id)) and (not getattr(viewer, 'is_staff', False)):
+                raise NotFound('资源不存在')
         parent = None
         if parent_id:
             parent = get_object_or_404(Comment, id=parent_id)
             if str(parent.video_id) != str(video.id):
                 raise ValidationError({'parent_id': '父评论不属于该视频'})
+        # 若作者关闭评论，任何用户均不可评论（完全关闭）
+        if not bool(getattr(video, 'allow_comments', True)):
+            raise PermissionDenied('评论已关闭')
         c = Comment.objects.create(content=content, user=request.user, video=video, parent=parent)
         setattr(c, 'replies_count', 0)
-        ser = CommentSerializer(c)
+        ser = CommentSerializer(c, context={'request': request})
         return Response(ser.data, status=status.HTTP_201_CREATED)
 
 
@@ -694,10 +785,27 @@ class CommentRepliesListView(APIView):
         pid = request.query_params.get('parent_id')
         if not pid:
             raise ValidationError({'parent_id': '缺少父评论ID'})
+        parent = get_object_or_404(Comment, id=pid)
+        # 校验所属视频可见性（私密仅作者/管理员）
+        video = None
+        try:
+            video = parent.video
+        except Exception:
+            video = None
+        if not video:
+            vid = getattr(parent, 'video_id', None)
+            if vid:
+                video = get_object_or_404(Video, id=vid)
+        if video and getattr(video, 'status', '') != 'published':
+            raise NotFound('资源不存在')
+        if video and getattr(video, 'visibility', 'public') == 'private':
+            viewer = request.user if (request.user and request.user.is_authenticated) else None
+            if (not viewer) or (str(viewer.id) != str(video.user_id) and not getattr(viewer, 'is_staff', False)):
+                raise NotFound('资源不存在')
         p = StandardResultsSetPagination()
         qs = Comment.objects.filter(Q(parent_id=pid) | Q(parent__parent_id=pid)).select_related('user').order_by('created_at').annotate(replies_count=Value(0, output_field=IntegerField()))
         page = p.paginate_queryset(qs, request, view=self)
-        ser = CommentSerializer(page, many=True)
+        ser = CommentSerializer(page, many=True, context={'request': request})
         return Response({'results': ser.data,
                          'page': p.page.number,
                          'page_size': p.get_page_size(request),
