@@ -2,6 +2,7 @@ import uuid
 import secrets
 import string
 from django.db import models
+from django.contrib.postgres.indexes import GinIndex
 from django.contrib.auth.hashers import make_password, check_password
 from django.core.validators import MinLengthValidator, RegexValidator
 from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
@@ -109,6 +110,8 @@ class User(AbstractBaseUser, PermissionsMixin):
             models.Index(fields=['email'], name='idx_users_email'),
             models.Index(fields=['date_joined'], name='idx_users_joined'),
             models.Index(fields=['followers_count'], name='idx_users_followers_cnt'),
+            GinIndex(fields=['username'], name='idx_users_username_trgm', opclasses=['gin_trgm_ops']),
+            GinIndex(fields=['nickname'], name='idx_users_nickname_trgm', opclasses=['gin_trgm_ops']),
         ]
         ordering = ['-date_joined']
 
