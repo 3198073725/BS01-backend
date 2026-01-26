@@ -6,6 +6,7 @@
 
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
+from django.contrib.postgres.search import TrigramSimilarity
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import permissions, status, generics
@@ -201,12 +202,17 @@ class UserSearchView(generics.ListAPIView):
 
     def get_queryset(self):
         qs = User.objects.all()
-        q = self.request.query_params.get('q')
+        q = (self.request.query_params.get('q') or '').strip()
         if q:
             qs = qs.filter(Q(username__icontains=q) | Q(nickname__icontains=q))
-        verified = self.request.query_params.get('verified', '').lower()
+        verified = (self.request.query_params.get('verified') or '').lower()
         if verified in ('1', 'true', 'yes'):
             qs = qs.filter(is_verified=True)
+        order = (self.request.query_params.get('order') or '').lower()
+        if order == 'relevance' and q:
+            qs = qs.annotate(sim=TrigramSimilarity('username', q) + 0.5 * TrigramSimilarity('nickname', q)).order_by('-sim', '-followers_count', '-date_joined')
+        else:
+            qs = qs.order_by('-date_joined')
         return qs
 
 
@@ -840,7 +846,7 @@ class LoginSendCodeView(APIView):
         cache.set(ip_cnt_key, ip_cnt + 1, timeout=ttl_day)
         resp = Response(status=status.HTTP_204_NO_CONTENT)
         try:
-            debug_flag = (getattr(settings, 'DEBUG', False) is True) or str(os.getenv('ECHO_LOGIN_CODE', 'false')).lower() in ('true','1','yes')
+            debug_flag = (getattr(settings, 'DEBUG', False) is True) and (str(os.getenv('ECHO_LOGIN_CODE', 'false')).lower() in ('true','1','yes'))
         except Exception:
             debug_flag = False
         if debug_flag:

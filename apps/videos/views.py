@@ -25,7 +25,7 @@ import shutil
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import permissions, status
-from rest_framework.exceptions import ValidationError, PermissionDenied
+from rest_framework.exceptions import ValidationError, PermissionDenied, NotAuthenticated, NotFound
 from rest_framework.parsers import MultiPartParser, FormParser
 from backend.common.pagination import StandardResultsSetPagination
 
@@ -33,6 +33,7 @@ from .models import Video
 from apps.interactions.models import Like, Favorite
 from apps.tasks.tasks import generate_vtt_and_thumbnail, transcode_video_to_hls
 from django.db.models import Count, Q
+from django.contrib.postgres.search import TrigramSimilarity
 
 
 def _ensure_dir(path: str) -> None:
@@ -249,9 +250,8 @@ class VideoUploadView(APIView):
                     pass
 
         # 元数据探测与缩略图
-        width, height, duration = _probe_video(video_abs)
-        _make_thumbnail(video_abs, thumb_abs, ts_sec=max(1, duration // 2) if duration else 1)
-        thumb_exists = os.path.exists(thumb_abs)
+        width, height, duration = 0, 0, 0
+        thumb_exists = False
 
         # 创建视频记录（先直接发布，后续可接入转码任务）
         v = Video.objects.create(
@@ -265,10 +265,10 @@ class VideoUploadView(APIView):
             width=width or 0,
             height=height or 0,
             file_size=int(file.size or 0),
-            status='published',
+            status='processing',
             upload_status='completed',
             user=request.user,
-            published_at=timezone.now(),
+            published_at=None,
         )
 
         base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
@@ -289,7 +289,6 @@ class VideoUploadView(APIView):
 
 class VideoListView(APIView):
     permission_classes = [permissions.AllowAny]
-    authentication_classes = []
 
     def get(self, request):
         # base/media for URL building
@@ -297,9 +296,15 @@ class VideoListView(APIView):
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         # build queryset with proper joins and projected fields
         qs = Video.objects.filter(status='published')
+        viewer = request.user if (request.user and request.user.is_authenticated) else None
         uid = request.query_params.get('user_id')
         if uid:
-            qs = qs.filter(user_id=uid)
+            if not (viewer and (str(viewer.id) == str(uid) or getattr(viewer, 'is_staff', False))):
+                qs = qs.filter(user_id=uid, visibility='public')
+            else:
+                qs = qs.filter(user_id=uid)
+        else:
+            qs = qs.filter(visibility='public')
         # keyword search (default: title only). Use ?in=all/desc to include description
         q = (request.query_params.get('q') or '').strip()
         if q:
@@ -311,6 +316,12 @@ class VideoListView(APIView):
         order = (request.query_params.get('order') or 'latest').lower()
         if order == 'hot':
             qs = qs.order_by('-like_count', '-view_count', '-published_at', '-created_at')
+        elif order == 'relevance' and q:
+            scope2 = (request.query_params.get('in') or '').strip().lower()
+            if scope2 in ('all', 'desc', 'description'):
+                qs = qs.annotate(sim=TrigramSimilarity('title', q) + 0.5 * TrigramSimilarity('description', q)).order_by('-sim', '-published_at', '-created_at')
+            else:
+                qs = qs.annotate(sim=TrigramSimilarity('title', q)).order_by('-sim', '-published_at', '-created_at')
         else:
             qs = qs.order_by('-published_at', '-created_at')
         qs = qs.select_related('user').only(
@@ -379,10 +390,17 @@ class VideoListView(APIView):
 
 class VideoDetailView(APIView):
     permission_classes = [permissions.AllowAny]
-    authentication_classes = []
 
     def get(self, request, pk):
         v = get_object_or_404(Video, pk=pk, status='published')
+        # 可见性控制：private 仅作者/管理员可见；unlisted 允许直链访问但不出现在列表/推荐
+        vis = getattr(v, 'visibility', 'public')
+        if vis == 'private':
+            viewer = request.user if (request.user and request.user.is_authenticated) else None
+            if (not viewer) or (str(viewer.id) != str(v.user_id) and not getattr(viewer, 'is_staff', False)):
+                raise NotFound('资源不存在')
+        viewer = request.user if (request.user and request.user.is_authenticated) else None
+        can_edit = bool(viewer and (str(viewer.id) == str(v.user_id) or getattr(viewer, 'is_staff', False)))
         base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         def url_of(rel: str) -> str:
@@ -414,6 +432,11 @@ class VideoDetailView(APIView):
             'duration': v.duration,
             'width': v.width,
             'height': v.height,
+            'allow_comments': bool(getattr(v, 'allow_comments', True)),
+            'allow_download': bool(getattr(v, 'allow_download', False)),
+            'visibility': getattr(v, 'visibility', 'public'),
+            'owner_id': str(v.user_id),
+            'can_edit': bool(can_edit),
             'video_url': (lambda r: (url_of(r) if (r and os.path.exists(os.path.join(settings.MEDIA_ROOT, r))) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
             'thumbnail_url': (lambda t: (url_of(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
             'view_count': v.view_count,
@@ -423,7 +446,7 @@ class VideoDetailView(APIView):
             'created_at': v.created_at,
             'published_at': v.published_at,
             'thumbnail_vtt_url': (url_of(vtt_rel) if os.path.exists(vtt_abs) else None),
-            'hls_master_url': (_build_media_url((getattr(settings, 'SITE_URL', '') or '').rstrip('/'), media, master_rel) if os.path.exists(master_abs) else None),
+            'hls_master_url': (_build_media_url(base, media, master_rel) if os.path.exists(master_abs) else None),
             'author': {
                 'id': str(getattr(v.user, 'id', '') or v.user_id),
                 'name': getattr(v.user, 'display_name', None) or getattr(v.user, 'username', ''),
@@ -442,12 +465,15 @@ class VideoDetailView(APIView):
         v = get_object_or_404(Video, pk=pk)
         user = getattr(request, 'user', None)
         if not (user and getattr(user, 'id', None)):
-            raise PermissionDenied('未登录')
+            raise NotAuthenticated('未登录')
         if str(v.user_id) != str(user.id):
             raise PermissionDenied('无权编辑该视频')
         data = request.data or {}
         title = data.get('title')
         description = data.get('description')
+        allow_comments = data.get('allow_comments')
+        allow_download = data.get('allow_download')
+        visibility = data.get('visibility')
         updated = False
         if isinstance(title, str):
             v.title = (title or '').strip()[:200]
@@ -455,8 +481,38 @@ class VideoDetailView(APIView):
         if isinstance(description, str):
             v.description = (description or '').strip()[:500]
             updated = True
+        if isinstance(allow_comments, bool):
+            try:
+                v.allow_comments = allow_comments
+                updated = True
+            except Exception:
+                pass
+        if isinstance(allow_download, bool):
+            try:
+                v.allow_download = allow_download
+                updated = True
+            except Exception:
+                pass
+        if isinstance(visibility, str) and visibility in {'public','unlisted','private'}:
+            try:
+                v.visibility = visibility
+                updated = True
+            except Exception:
+                pass
         if updated:
-            v.save(update_fields=['title', 'description', 'updated_at'])
+            fields = ['updated_at']
+            if isinstance(title, str):
+                fields.append('title')
+            if isinstance(description, str):
+                fields.append('description')
+            if isinstance(allow_comments, bool):
+                fields.append('allow_comments')
+            if isinstance(allow_download, bool):
+                fields.append('allow_download')
+            if isinstance(visibility, str) and visibility in {'public','unlisted','private'}:
+                fields.append('visibility')
+            # 去重
+            v.save(update_fields=list(dict.fromkeys(fields)))
 
         # 复用 GET 的返回结构
         base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
@@ -465,12 +521,15 @@ class VideoDetailView(APIView):
             if media.startswith('http://') or media.startswith('https://'):
                 return f"{media}/{rel}"
             return f"{base}{media}/{rel}" if media.startswith('/') else f"{base}/{media}/{rel}"
-        vtt_rel = f"videos/thumbs/{os.path.splitext(os.path.basename(v.video_file))[0]}.vtt"
+        key = os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]
+        vtt_rel = f"videos/thumbs/{key}.vtt"
         vtt_abs = os.path.join(settings.MEDIA_ROOT, vtt_rel)
-        master_rel = f"videos/hls/{os.path.splitext(os.path.basename(v.video_file))[0]}/master.m3u8"
+        master_rel = f"videos/hls/{key}/master.m3u8"
         master_abs = os.path.join(settings.MEDIA_ROOT, master_rel)
         liked = False
         favorited = False
+        # 当前方法已校验作者身份，因此可直接标记为可编辑
+        can_edit = True
         try:
             from apps.interactions.models import Favorite
             fav_count = Favorite.objects.filter(video=v).count()
@@ -483,8 +542,13 @@ class VideoDetailView(APIView):
             'duration': v.duration,
             'width': v.width,
             'height': v.height,
-            'video_url': url_of(v.video_file),
-            'thumbnail_url': url_of(v.thumbnail) if v.thumbnail else None,
+            'allow_comments': bool(getattr(v, 'allow_comments', True)),
+            'allow_download': bool(getattr(v, 'allow_download', False)),
+            'visibility': getattr(v, 'visibility', 'public'),
+            'owner_id': str(v.user_id),
+            'can_edit': bool(can_edit),
+            'video_url': (lambda r: (url_of(r) if (r and os.path.exists(os.path.join(settings.MEDIA_ROOT, r))) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
+            'thumbnail_url': (lambda t: (url_of(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
             'view_count': v.view_count,
             'comment_count': v.comment_count,
             'like_count': v.like_count,
@@ -492,7 +556,7 @@ class VideoDetailView(APIView):
             'created_at': v.created_at,
             'published_at': v.published_at,
             'thumbnail_vtt_url': (url_of(vtt_rel) if os.path.exists(vtt_abs) else None),
-            'hls_master_url': (_build_media_url((getattr(settings, 'SITE_URL', '') or '').rstrip('/'), media, master_rel) if os.path.exists(master_abs) else None),
+            'hls_master_url': (_build_media_url(base, media, master_rel) if os.path.exists(master_abs) else None),
             'author': {
                 'id': str(getattr(v.user, 'id', '') or v.user_id),
                 'name': getattr(v.user, 'display_name', None) or getattr(v.user, 'username', ''),
@@ -527,6 +591,34 @@ class VideoBulkDeleteView(APIView):
         qs = Video.objects.filter(user=request.user, id__in=ids)
         removed, _ = qs.delete()
         return Response({'removed': int(removed)})
+
+
+class VideoBulkUpdateView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        ids = request.data.get('video_ids') or request.data.get('ids')
+        if not isinstance(ids, list) or not ids:
+            raise ValidationError({'video_ids': '必须为非空数组'})
+        ids = [str(i) for i in ids if str(i)]
+        if len(ids) > 200:
+            raise ValidationError({'video_ids': '一次最多处理 200 个'})
+        updates = {}
+        if 'allow_comments' in request.data and isinstance(request.data.get('allow_comments'), bool):
+            updates['allow_comments'] = bool(request.data.get('allow_comments'))
+        if 'allow_download' in request.data and isinstance(request.data.get('allow_download'), bool):
+            updates['allow_download'] = bool(request.data.get('allow_download'))
+        if 'visibility' in request.data:
+            vis = str(request.data.get('visibility') or '')
+            if vis in {'public','unlisted','private'}:
+                updates['visibility'] = vis
+            elif vis:
+                raise ValidationError({'visibility': '取值无效'})
+        if not updates:
+            return Response({'updated': 0})
+        qs = Video.objects.filter(user=request.user, id__in=ids)
+        n = qs.update(**updates)
+        return Response({'updated': int(n)})
 
 
 class UploadInitView(APIView):
@@ -658,9 +750,9 @@ class UploadCompleteView(APIView):
         video_abs = os.path.join(settings.MEDIA_ROOT, video_rel)
         os.replace(tmp_merged, video_abs)
         thumb_rel = f"videos/thumbs/{vid}.jpg"; thumb_abs = os.path.join(settings.MEDIA_ROOT, thumb_rel)
-        width, height, duration = _probe_video(video_abs)
-        _make_thumbnail(video_abs, thumb_abs, ts_sec=max(1, duration // 2) if duration else 1)
-        thumb_exists = os.path.exists(thumb_abs)
+        # 元数据探测与缩略图
+        width, height, duration = 0, 0, 0
+        thumb_exists = False
         v = Video.objects.create(
             title=(title or os.path.splitext(meta['filename'])[0] or '未命名视频')[:200],
             description=description or '',
