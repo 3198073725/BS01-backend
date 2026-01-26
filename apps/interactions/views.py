@@ -506,7 +506,6 @@ class LikeToggleView(APIView):
         except Exception:
             raise ValidationError({'video_id': '格式不正确'})
         v = get_object_or_404(Video, pk=vid)
-        # 未发布视频不允许此操作
         if getattr(v, 'status', '') != 'published':
             raise NotFound('资源不存在')
         # 私密视频仅作者/管理员可操作
@@ -538,7 +537,6 @@ class FavoriteToggleView(APIView):
         if not vid:
             raise ValidationError({'video_id': '必填'})
         v = get_object_or_404(Video, pk=vid)
-        # 未发布视频不允许此操作
         if getattr(v, 'status', '') != 'published':
             raise NotFound('资源不存在')
         # 私密视频仅作者/管理员可操作
@@ -571,7 +569,6 @@ class HistoryRecordView(APIView):
         if not vid:
             raise ValidationError({'video_id': '必填'})
         v = get_object_or_404(Video, pk=vid)
-        # 未发布视频不允许此操作
         if getattr(v, 'status', '') != 'published':
             raise NotFound('资源不存在')
         # 私密视频仅作者/管理员可写入观看记录
