@@ -22,7 +22,7 @@ from django.core.cache import cache
 from django.core.validators import validate_email as dj_validate_email
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.exceptions import TokenError, InvalidToken
 from django.db import IntegrityError, DatabaseError
 import os
@@ -159,7 +159,13 @@ class ContactSubmitView(APIView):
         ]
         text_body = "\n".join(text_lines)
 
-        to_addr = getattr(settings, 'CONTACT_EMAIL_TO', '') or 'mediacms@126.com'
+        to_addr = (getattr(settings, 'CONTACT_EMAIL_TO', '') or '').strip()
+        if not to_addr:
+            try:
+                logger.warning("contact_submit_missing_recipient type=%s from=%s ip=%s", ctype, email, ip)
+            except Exception:
+                pass
+            raise ValidationError({'detail': '服务暂不可用：未配置收件邮箱，请稍后再试或直接使用邮件客户端'})
         bcc_list = getattr(settings, 'ADMIN_EMAIL_LIST', []) or []
         try:
             msg = EmailMultiAlternatives(final_subject, text_body, settings.DEFAULT_FROM_EMAIL, [to_addr], bcc=bcc_list, reply_to=[email])
@@ -1126,3 +1132,33 @@ class TokenObtainPairViewWithCooldown(TokenObtainPairView):
     def _clear_failure(self, uname, ip):
         cache.delete(f"login_pwd:fail_u:{uname.lower()}")
         cache.delete(f"login_pwd:fail_ip:{ip}")
+
+
+class TokenRefreshViewWithRevoke(TokenRefreshView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        # Deny refresh if the refresh token was issued before force-logout cutoff
+        try:
+            raw = request.data.get('refresh') if hasattr(request, 'data') else None
+        except Exception:
+            raw = None
+        if raw:
+            try:
+                r = RefreshToken(raw)
+                uid = str(r.payload.get('user_id') or r.payload.get('user') or '')
+                iat = int(r.payload.get('iat') or 0)
+                if uid:
+                    key = f"logout_after:{uid}"
+                    val = cache.get(key)
+                    if val:
+                        try:
+                            cutoff = int(val)
+                        except Exception:
+                            cutoff = 0
+                        if iat and iat < cutoff:
+                            raise AuthenticationFailed('凭证已失效，请重新登录')
+            except Exception:
+                # Let parent serializer handle invalid token/format
+                pass
+        return super().post(request, *args, **kwargs)

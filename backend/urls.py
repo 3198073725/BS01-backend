@@ -21,10 +21,9 @@ from django.conf.urls.static import static
 from django.http import JsonResponse
 from django.views.static import serve as static_serve
 from rest_framework_simplejwt.views import (
-    TokenRefreshView,
     TokenVerifyView,
 )
-from apps.users.views import TokenObtainPairViewWithCooldown
+from apps.users.views import TokenObtainPairViewWithCooldown, TokenRefreshViewWithRevoke
 import os
 
 
@@ -38,6 +37,7 @@ urlpatterns = [
     # 各业务子应用 API 前缀
     path('api/health/', health, name='health'),
     path('api/users/', include('apps.users.urls')),
+    path('api/admin/', include('apps.adminapi.urls')),
     path('api/videos/', include('apps.videos.urls')),
     path('api/interactions/', include('apps.interactions.urls')),
     path('api/content/', include('apps.content.urls')),
@@ -50,11 +50,11 @@ urlpatterns = [
 
     # JWT 鉴权端点（Obtain/Refresh/Verify）
     path('api/token/', TokenObtainPairViewWithCooldown.as_view(), name='token_obtain_pair'),
-    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('api/token/refresh/', TokenRefreshViewWithRevoke.as_view(), name='token_refresh'),
     path('api/token/verify/', TokenVerifyView.as_view(), name='token_verify'),
 ]
 
-if settings.DEBUG or str(os.getenv('SERVE_MEDIA', 'true')).lower() in ('true','1','yes'):
+if settings.DEBUG or str(os.getenv('SERVE_MEDIA', 'false')).lower() in ('true','1','yes'):
     # 使用 Django 提供的静态文件视图服务媒体文件（仅开发/内网调试场景）
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
     urlpatterns += [

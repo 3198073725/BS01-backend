@@ -19,6 +19,7 @@ urlpatterns = [
     path('likes/', views.LikesListView.as_view(), name='likes-list'),
     path('favorites/', views.FavoritesListView.as_view(), name='favorites-list'),
     path('watch-later/', views.WatchLaterListView.as_view(), name='watch-later-list'),
+    path('watch-later/toggle/', views.WatchLaterToggleView.as_view(), name='watch-later-toggle'),
     path('history/', views.HistoryListView.as_view(), name='history-list'),
     path('history/record/', views.HistoryRecordView.as_view(), name='history-record'),
     path('relationship/', views.RelationshipView.as_view(), name='relationship'),

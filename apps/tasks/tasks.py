@@ -8,6 +8,7 @@ from typing import Optional
 from celery import shared_task
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 
 from apps.videos.models import Video
 
@@ -71,9 +72,58 @@ def generate_vtt_and_thumbnail(self, video_id: str) -> dict:
     if not os.path.exists(video_abs):
         return {'ok': False, 'error': 'video_file_missing'}
 
-    duration = int(v.duration or 0)
-    if duration <= 0:
-        _, _, duration = _probe_video(video_abs)
+    # Backfill basic metadata if missing
+    width = int(getattr(v, 'width', 0) or 0)
+    height = int(getattr(v, 'height', 0) or 0)
+    duration = int(getattr(v, 'duration', 0) or 0)
+    if width <= 0 or height <= 0 or duration <= 0:
+        pw, ph, pdur = _probe_video(video_abs)
+        width = width or pw
+        height = height or ph
+        duration = duration or pdur
+
+    # Ensure a primary thumbnail exists and update model if needed
+    thumb_rel = f"videos/thumbs/{vid_key}.jpg"
+    thumb_abs = os.path.join(settings.MEDIA_ROOT, thumb_rel)
+    if not os.path.exists(thumb_abs):
+        try:
+            seek = max(1, int((duration or 0) // 2) if duration else 1)
+            cmd = [
+                'ffmpeg', '-y', '-ss', str(seek), '-i', video_abs,
+                '-frames:v', '1', '-vf', 'scale=480:-1', thumb_abs,
+            ]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=20)
+        except Exception:
+            pass
+
+    # Persist backfilled fields
+    try:
+        update_fields = []
+        if width and (int(getattr(v, 'width', 0) or 0) != width):
+            v.width = width
+            update_fields.append('width')
+        if height and (int(getattr(v, 'height', 0) or 0) != height):
+            v.height = height
+            update_fields.append('height')
+        if duration and (int(getattr(v, 'duration', 0) or 0) != duration):
+            v.duration = duration
+            update_fields.append('duration')
+        if os.path.exists(thumb_abs) and not getattr(v, 'thumbnail', None):
+            # set both char and file path fields if available
+            v.thumbnail = thumb_rel[:100]
+            try:
+                v.thumbnail_f = thumb_rel[:200]
+                update_fields.extend(['thumbnail', 'thumbnail_f'])
+            except Exception:
+                update_fields.append('thumbnail')
+        if update_fields:
+            try:
+                update_fields.append('updated_at')
+            except Exception:
+                pass
+            v.save(update_fields=list(dict.fromkeys(update_fields)))
+    except Exception:
+        pass
 
     try:
         thumb_w = 160
@@ -96,9 +146,10 @@ def generate_vtt_and_thumbnail(self, video_id: str) -> dict:
                 start = idx * interval
                 end = min((idx + 1) * interval, duration or ((idx + 1) * interval))
                 f.write(f"{_format_ts(start)} --> {_format_ts(end)}\n")
-                url = _build_media_url(base, media, f"{frames_rel_dir}/{name}")
-                f.write(f"{url}\n\n")
-        return {'ok': True, 'vtt_rel': vtt_rel}
+                # Use path relative to the VTT file location to avoid absolute host coupling
+                rel_to_vtt = f"{vid_key}_vtt/{name}"
+                f.write(f"{rel_to_vtt}\n\n")
+        return {'ok': True, 'vtt_rel': vtt_rel, 'meta_updated': True}
     except Exception as e:
         return {'ok': False, 'error': str(e)[:200]}
 
@@ -126,6 +177,8 @@ def transcode_video_to_hls(self, video_id: str) -> dict:
     if width <= 0 or height <= 0:
         width, height, _ = _probe_video(video_abs)
 
+    error = None
+    low_rel = None
     try:
         out_dir = os.path.join(settings.MEDIA_ROOT, 'videos', 'hls', vid_key)
         os.makedirs(out_dir, exist_ok=True)
@@ -153,19 +206,53 @@ def transcode_video_to_hls(self, video_id: str) -> dict:
             if os.path.exists(m3u8):
                 entries.append((p['name'], p['h']))
         if not entries:
-            return {'ok': False, 'error': 'no_variants'}
+            error = 'no_variants'
+            return {'ok': False, 'error': error}
+
+        # 生成低清 MP4 供 processing 占位播放
+        try:
+            low_dir = os.path.join(settings.MEDIA_ROOT, 'videos', 'low')
+            os.makedirs(low_dir, exist_ok=True)
+            low_rel = f"videos/low/{vid_key}.mp4"
+            low_abs = os.path.join(settings.MEDIA_ROOT, low_rel)
+            cmd_low = [
+                'ffmpeg', '-y', '-i', video_abs,
+                '-vf', 'scale=-2:360', '-c:v', 'libx264', '-preset', 'superfast', '-crf', '30',
+                '-c:a', 'aac', '-ar', '44100', '-b:a', '96k',
+                low_abs,
+            ]
+            subprocess.run(cmd_low, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=900)
+            if not os.path.exists(low_abs):
+                low_rel = None
+        except Exception:
+            low_rel = None
+
         master_rel = f"videos/hls/{vid_key}/master.m3u8"
         master_abs = os.path.join(settings.MEDIA_ROOT, master_rel)
-        def rel(path: str) -> str:
-            return os.path.relpath(path, settings.MEDIA_ROOT).replace('\\', '/')
         with open(master_abs, 'w', encoding='utf-8') as f:
             f.write('#EXTM3U\n')
             f.write('#EXT-X-VERSION:3\n')
             for name, h in entries:
                 bw = 2500000 if h >= 700 else 1200000
-                uri = _build_media_url(base or '', media, rel(os.path.join(out_dir, name, 'index.m3u8')))
+                # Write variant URI relative to the master playlist
+                uri = f"{name}/index.m3u8"
                 f.write(f"#EXT-X-STREAM-INF:BANDWIDTH={bw},RESOLUTION={1280 if h>=700 else 854}x{h}\n")
                 f.write(f"{uri}\n")
-        return {'ok': True, 'master_rel': master_rel}
+        # 回写低清/错误清空
+        try:
+            v.low_mp4 = low_rel if low_rel else None
+            v.transcode_error = None
+            v.save(update_fields=['low_mp4', 'transcode_error', 'updated_at'])
+        except Exception:
+            pass
+        # Do NOT auto-publish here. Keep status as-is (e.g., 'processing').
+        # Admins will review and publish explicitly in the admin console.
+        return {'ok': True, 'master_rel': master_rel, 'low_mp4': low_rel}
     except Exception as e:
-        return {'ok': False, 'error': str(e)[:200]}
+        error = str(e)[:200]
+        try:
+            v.transcode_error = error
+            v.save(update_fields=['transcode_error', 'updated_at'])
+        except Exception:
+            pass
+        return {'ok': False, 'error': error}

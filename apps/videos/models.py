@@ -22,6 +22,11 @@ class Video(models.Model):
     width = models.IntegerField(default=0, verbose_name="宽度")
     height = models.IntegerField(default=0, verbose_name="高度")
     file_size = models.BigIntegerField(default=0, verbose_name="文件大小(字节)")
+    allow_comments = models.BooleanField(default=True, verbose_name="允许评论")
+    allow_download = models.BooleanField(default=False, verbose_name="允许下载")
+    low_mp4 = models.CharField(max_length=150, null=True, blank=True, verbose_name="低清 MP4 地址")
+    transcode_error = models.TextField(null=True, blank=True, verbose_name="转码错误信息")
+    visibility = models.CharField(max_length=20, default='public', verbose_name="可见性")
     status = models.CharField(max_length=20, default='draft', verbose_name="状态")
     upload_status = models.CharField(max_length=20, default='pending', verbose_name="上传状态")
     user = models.ForeignKey('users.User', on_delete=models.CASCADE, db_column='user_id', related_name='videos', verbose_name="用户")
@@ -29,6 +34,7 @@ class Video(models.Model):
     view_count = models.BigIntegerField(default=0, verbose_name="播放次数")
     like_count = models.BigIntegerField(default=0, verbose_name="点赞数")
     comment_count = models.BigIntegerField(default=0, verbose_name="评论数")
+    is_featured = models.BooleanField(default=False, verbose_name="精选")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
     published_at = models.DateTimeField(null=True, blank=True, verbose_name="发布时间")
@@ -47,6 +53,7 @@ class Video(models.Model):
             models.CheckConstraint(condition=Q(status__in=['draft', 'processing', 'published', 'banned']), name='chk_video_status'),
             models.CheckConstraint(condition=Q(upload_status__in=['pending', 'uploading', 'completed', 'failed']), name='chk_upload_status'),
             models.CheckConstraint(condition=Q(duration__gte=0) & Q(width__gte=0) & Q(height__gte=0) & Q(file_size__gte=0), name='chk_video_nonnegatives'),
+            models.CheckConstraint(condition=Q(visibility__in=['public','unlisted','private']), name='chk_video_visibility'),
         ]
         verbose_name = "视频"
         verbose_name_plural = "视频"

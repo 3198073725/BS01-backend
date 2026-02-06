@@ -5,10 +5,11 @@
 """
 
 from django.urls import path
+from .views import TagListView, CategoryListView
 
 app_name = 'content'
 
 urlpatterns = [
-    # 示例：
-    # path('tags/', views.TagListView.as_view(), name='tag-list'),
+    path('tags/', TagListView.as_view(), name='tag-list'),
+    path('categories/', CategoryListView.as_view(), name='category-list'),
 ]

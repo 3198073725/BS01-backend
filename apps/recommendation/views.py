@@ -6,6 +6,7 @@
 
 from django.conf import settings
 import os
+from django.core.files.storage import default_storage
 from django.core.cache import cache
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -55,9 +56,25 @@ class RecommendationFeedView(APIView):
             if media.startswith('http://') or media.startswith('https://'):
                 return f"{media}/{rel}"
             return f"{base}{media}/{rel}" if media.startswith('/') else f"{base}/{media}/{rel}"
-
+        def to_url(rel: str):
+            if not rel:
+                return None
+            try:
+                s = str(rel)
+            except Exception:
+                s = ''
+            if s.startswith('http://') or s.startswith('https://'):
+                return s
+            try:
+                u = default_storage.url(rel)
+            except Exception:
+                u = None
+            if u and (u.startswith('http://') or u.startswith('https://')):
+                return u
+            return url_of(rel)
+        
         qs = (Video.objects
-              .filter(status='published')
+              .filter(status='published', visibility='public')
               .select_related('user')
               .only('id','title','duration','width','height','video_file','thumbnail','video_file_f','thumbnail_f',
                     'view_count','like_count','comment_count','created_at','published_at',
@@ -92,29 +109,28 @@ class RecommendationFeedView(APIView):
         for v in items:
             key = os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]
             vtt_rel = f"videos/thumbs/{key}.vtt"
-            vtt_abs = os.path.join(settings.MEDIA_ROOT, vtt_rel)
             master_rel = f"videos/hls/{key}/master.m3u8"
-            master_abs = os.path.join(settings.MEDIA_ROOT, master_rel)
             data.append({
                 'id': str(v.id),
                 'title': v.title,
                 'duration': v.duration,
                 'width': v.width,
                 'height': v.height,
-                'video_url': (lambda r: (url_of(r) if (r and os.path.exists(os.path.join(settings.MEDIA_ROOT, r))) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
-                'thumbnail_url': (lambda t: (url_of(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
+                'video_url': (lambda r: (to_url(r) if (r and default_storage.exists(r)) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
+                'thumbnail_url': (lambda t: (to_url(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
                 'view_count': v.view_count,
                 'like_count': v.like_count,
                 'comment_count': v.comment_count,
                 'created_at': v.created_at,
                 'published_at': v.published_at,
-                'thumbnail_vtt_url': (url_of(vtt_rel) if os.path.exists(vtt_abs) else None),
-                'hls_master_url': (url_of(master_rel) if os.path.exists(master_abs) else None),
+                'thumbnail_vtt_url': (to_url(vtt_rel) if default_storage.exists(vtt_rel) else None),
+                'hls_master_url': (to_url(master_rel) if default_storage.exists(master_rel) else None),
+                'is_featured': bool(getattr(v, 'is_featured', False)),
                 'author': {
                     'id': str(getattr(v.user, 'id', '') or v.user_id),
                     'name': getattr(v.user, 'display_name', None) or getattr(v.user, 'username', ''),
                     'username': getattr(v.user, 'username', ''),
-                    'avatar_url': (url_of(getattr(getattr(v.user, 'profile_picture_f', None), 'name', None)) if getattr(getattr(v.user, 'profile_picture_f', None), 'name', None) else (url_of(getattr(v.user, 'profile_picture', '')) if getattr(v.user, 'profile_picture', None) else None)),
+                    'avatar_url': (to_url(getattr(getattr(v.user, 'profile_picture_f', None), 'name', None)) if getattr(getattr(v.user, 'profile_picture_f', None), 'name', None) else (to_url(getattr(v.user, 'profile_picture', '')) if getattr(v.user, 'profile_picture', None) else None)),
                 },
                 'favorite_count': fav_count_map.get(str(v.id), 0),
                 'liked': (str(v.id) in liked_ids),
@@ -153,9 +169,25 @@ class FollowingFeedView(APIView):
             if media.startswith('http://') or media.startswith('https://'):
                 return f"{media}/{rel}"
             return f"{base}{media}/{rel}" if media.startswith('/') else f"{base}/{media}/{rel}"
+        def to_url(rel: str):
+            if not rel:
+                return None
+            try:
+                s = str(rel)
+            except Exception:
+                s = ''
+            if s.startswith('http://') or s.startswith('https://'):
+                return s
+            try:
+                u = default_storage.url(rel)
+            except Exception:
+                u = None
+            if u and (u.startswith('http://') or u.startswith('https://')):
+                return u
+            return url_of(rel)
 
         qs = (Video.objects
-              .filter(status='published', user_id__in=followed_ids)
+              .filter(status='published', visibility='public', user_id__in=followed_ids)
               .select_related('user')
               .only('id','title','duration','width','height','video_file','thumbnail','video_file_f','thumbnail_f',
                     'view_count','like_count','comment_count','created_at','published_at',
@@ -187,29 +219,27 @@ class FollowingFeedView(APIView):
         for v in items:
             key = os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]
             vtt_rel = f"videos/thumbs/{key}.vtt"
-            vtt_abs = os.path.join(settings.MEDIA_ROOT, vtt_rel)
             master_rel = f"videos/hls/{key}/master.m3u8"
-            master_abs = os.path.join(settings.MEDIA_ROOT, master_rel)
             data.append({
                 'id': str(v.id),
                 'title': v.title,
                 'duration': v.duration,
                 'width': v.width,
                 'height': v.height,
-                'video_url': (lambda r: (url_of(r) if (r and os.path.exists(os.path.join(settings.MEDIA_ROOT, r))) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
-                'thumbnail_url': (lambda t: (url_of(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
+                'video_url': (lambda r: (to_url(r) if (r and default_storage.exists(r)) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
+                'thumbnail_url': (lambda t: (to_url(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
                 'view_count': v.view_count,
                 'like_count': v.like_count,
                 'comment_count': v.comment_count,
                 'created_at': v.created_at,
                 'published_at': v.published_at,
-                'thumbnail_vtt_url': (url_of(vtt_rel) if os.path.exists(vtt_abs) else None),
-                'hls_master_url': (url_of(master_rel) if os.path.exists(master_abs) else None),
+                'thumbnail_vtt_url': (to_url(vtt_rel) if default_storage.exists(vtt_rel) else None),
+                'hls_master_url': (to_url(master_rel) if default_storage.exists(master_rel) else None),
                 'author': {
                     'id': str(getattr(v.user, 'id', '') or v.user_id),
                     'name': getattr(v.user, 'display_name', None) or getattr(v.user, 'username', ''),
                     'username': getattr(v.user, 'username', ''),
-                    'avatar_url': (url_of(getattr(getattr(v.user, 'profile_picture_f', None), 'name', None)) if getattr(getattr(v.user, 'profile_picture_f', None), 'name', None) else (url_of(getattr(v.user, 'profile_picture', '')) if getattr(v.user, 'profile_picture', None) else None)),
+                    'avatar_url': (to_url(getattr(getattr(v.user, 'profile_picture_f', None), 'name', None)) if getattr(getattr(v.user, 'profile_picture_f', None), 'name', None) else (to_url(getattr(v.user, 'profile_picture', '')) if getattr(v.user, 'profile_picture', None) else None)),
                 },
                 'favorite_count': fav_count_map.get(str(v.id), 0),
                 'liked': (str(v.id) in liked_ids),
@@ -241,8 +271,18 @@ class FeaturedFeedView(APIView):
             if media.startswith('http://') or media.startswith('https://'):
                 return f"{media}/{rel}"
             return f"{base}{media}/{rel}" if media.startswith('/') else f"{base}/{media}/{rel}"
+        def to_url(rel: str):
+            if not rel:
+                return None
+            try:
+                u = default_storage.url(rel)
+            except Exception:
+                u = None
+            if u and (u.startswith('http://') or u.startswith('https://')):
+                return u
+            return url_of(rel)
 
-        # like_count > 20 或收藏数 > 10（用分组查询避免某些环境下 annotate 反向聚合引发错误）
+        # 标记精选 or 达到阈值：like_count > 20 或收藏数 > 10（用分组查询避免某些环境下 annotate 反向聚合引发错误）
         try:
             fav_ids = list(
                 Favorite.objects.values('video_id').annotate(c=Count('id')).filter(c__gt=10).values_list('video_id', flat=True)
@@ -250,13 +290,13 @@ class FeaturedFeedView(APIView):
         except Exception:
             fav_ids = []
         qs = (Video.objects
-              .filter(status='published')
-              .filter(Q(like_count__gt=20) | Q(id__in=fav_ids))
+              .filter(status='published', visibility='public')
+              .filter(Q(is_featured=True) | Q(like_count__gt=20) | Q(id__in=fav_ids))
               .select_related('user')
               .only('id','title','duration','width','height','video_file','thumbnail','video_file_f','thumbnail_f',
                     'view_count','like_count','comment_count','created_at','published_at',
                     'user__id','user__username','user__nickname','user__profile_picture','user__profile_picture_f')
-              .order_by('-published_at', '-created_at'))
+              .order_by('-is_featured', '-published_at', '-created_at'))
         p = StandardResultsSetPagination()
         items = p.paginate_queryset(qs, request, view=self)
 
@@ -284,29 +324,27 @@ class FeaturedFeedView(APIView):
         for v in items:
             key = os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]
             vtt_rel = f"videos/thumbs/{key}.vtt"
-            vtt_abs = os.path.join(settings.MEDIA_ROOT, vtt_rel)
             master_rel = f"videos/hls/{key}/master.m3u8"
-            master_abs = os.path.join(settings.MEDIA_ROOT, master_rel)
             data.append({
                 'id': str(v.id),
                 'title': v.title,
                 'duration': v.duration,
                 'width': v.width,
                 'height': v.height,
-                'video_url': (lambda r: (url_of(r) if (r and os.path.exists(os.path.join(settings.MEDIA_ROOT, r))) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
-                'thumbnail_url': (lambda t: (url_of(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
+                'video_url': (lambda r: (to_url(r) if (r and default_storage.exists(r)) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
+                'thumbnail_url': (lambda t: (to_url(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
                 'view_count': v.view_count,
                 'like_count': v.like_count,
                 'comment_count': v.comment_count,
                 'created_at': v.created_at,
                 'published_at': v.published_at,
-                'thumbnail_vtt_url': (url_of(vtt_rel) if os.path.exists(vtt_abs) else None),
-                'hls_master_url': (url_of(master_rel) if os.path.exists(master_abs) else None),
+                'thumbnail_vtt_url': (to_url(vtt_rel) if default_storage.exists(vtt_rel) else None),
+                'hls_master_url': (to_url(master_rel) if default_storage.exists(master_rel) else None),
                 'author': {
                     'id': str(getattr(v.user, 'id', '') or v.user_id),
                     'name': getattr(v.user, 'display_name', None) or getattr(v.user, 'username', ''),
                     'username': getattr(v.user, 'username', ''),
-                    'avatar_url': (url_of(getattr(getattr(v.user, 'profile_picture_f', None), 'name', None)) if getattr(getattr(v.user, 'profile_picture_f', None), 'name', None) else (url_of(getattr(v.user, 'profile_picture', '')) if getattr(v.user, 'profile_picture', None) else None)),
+                    'avatar_url': (to_url(getattr(getattr(v.user, 'profile_picture_f', None), 'name', None)) if getattr(getattr(v.user, 'profile_picture_f', None), 'name', None) else (to_url(getattr(v.user, 'profile_picture', '')) if getattr(v.user, 'profile_picture', None) else None)),
                 },
                 'favorite_count': fav_count_map.get(str(v.id), 0),
                 'liked': (str(v.id) in liked_ids),

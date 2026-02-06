@@ -560,6 +560,41 @@ class FavoriteToggleView(APIView):
         return Response({'favorited': favorited, 'favorite_count': int(fresh)})
 
 
+class WatchLaterToggleView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        vid = request.data.get('video_id') or request.data.get('id')
+        if not vid:
+            raise ValidationError({'video_id': '必填'})
+        # 校验 UUID，避免 ValueError
+        try:
+            UUID(str(vid))
+        except Exception:
+            raise ValidationError({'video_id': '格式不正确'})
+        v = get_object_or_404(Video, pk=vid)
+        if getattr(v, 'status', '') != 'published':
+            raise NotFound('资源不存在')
+        # 私密视频仅作者/管理员可操作
+        if getattr(v, 'visibility', 'public') == 'private':
+            viewer = request.user
+            if (str(viewer.id) != str(v.user_id)) and (not getattr(viewer, 'is_staff', False)):
+                raise NotFound('资源不存在')
+        obj = WatchLater.objects.filter(user=request.user, video=v).first()
+        saved = False
+        if obj:
+            obj.delete()
+            saved = False
+        else:
+            try:
+                WatchLater.objects.create(user=request.user, video=v)
+                saved = True
+            except IntegrityError:
+                saved = True
+        count = WatchLater.objects.filter(user=request.user).count()
+        return Response({'saved': saved, 'watch_later_count': int(count)})
+
+
 class HistoryRecordView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_scope = 'history'
@@ -719,6 +754,7 @@ class CommentCreateSerializer(serializers.Serializer):
 
 class CommentsListCreateView(APIView):
     permission_classes = [permissions.AllowAny]
+    throttle_scope = 'comments'
 
     def get(self, request):
         vid = request.query_params.get('video_id')
@@ -812,6 +848,7 @@ class CommentRepliesListView(APIView):
 
 class CommentDetailView(APIView):
     permission_classes = [permissions.IsAuthenticated]
+    throttle_scope = 'comments'
 
     def delete(self, request, pk):
         c = get_object_or_404(Comment, id=pk)

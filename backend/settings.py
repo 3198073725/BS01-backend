@@ -14,6 +14,7 @@ from pathlib import Path
 import os
 import sys
 from datetime import timedelta
+from kombu import Queue
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 
@@ -65,6 +66,7 @@ INSTALLED_APPS = [
     'apps.recommendation',
     'apps.notifications',
     'apps.analytics',
+    'apps.adminapi',
     'apps.configs',
     'apps.core.apps.CoreConfig',
     'apps.tasks',
@@ -141,10 +143,11 @@ WSGI_APPLICATION = 'backend.wsgi.application'
  # Django REST framework 配置
 REST_FRAMEWORK = {
     # 默认鉴权方式：优先使用 JWT，其次保留 Session 便于管理后台及开发调试
-    'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-        'rest_framework.authentication.SessionAuthentication',
-    ],
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        ['backend.auth.JWTAuthenticationWithRevoke', 'rest_framework.authentication.SessionAuthentication']
+        if os.getenv('API_ENABLE_SESSION_AUTH', 'false').lower() in ('true', '1', 'yes')
+        else ['backend.auth.JWTAuthenticationWithRevoke']
+    ),
     # 默认权限：需登录（持有有效 JWT 或 Session）
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -170,11 +173,14 @@ REST_FRAMEWORK = {
         'qr_login_status': os.getenv('THROTTLE_QR_LOGIN_STATUS', '3600/hour'),
         'qr_login_confirm': os.getenv('THROTTLE_QR_LOGIN_CONFIRM', '600/hour'),
         'follow': os.getenv('THROTTLE_FOLLOW', '200/hour'),
+        'comments': os.getenv('THROTTLE_COMMENTS', '120/hour'),
         # 观看历史上报（播放器每 10s 一次，实际会去抖；按小时限速足够）
         'history': os.getenv('THROTTLE_HISTORY', '3600/hour'),
         'video_upload': os.getenv('THROTTLE_VIDEO_UPLOAD', '20/hour'),
         'analytics': os.getenv('THROTTLE_ANALYTICS', '5000/hour'),
         'recommendation_feed': os.getenv('THROTTLE_RECOMMENDATION_FEED', '1800/hour'),
+        'following_feed': os.getenv('THROTTLE_FOLLOWING_FEED', '1800/hour'),
+        'featured_feed': os.getenv('THROTTLE_FEATURED_FEED', '1800/hour'),
         # 用户头像弹窗汇总接口节流（避免滥刷）。需与视图中的 throttle_scope=popup_stats 对应。
         'popup_stats': os.getenv('THROTTLE_POPUP_STATS', '1800/hour'),
         # 联系我们表单提交
@@ -192,7 +198,7 @@ AUTH_USER_MODEL = 'users.User'
 # SimpleJWT 配置：令牌有效期、前缀等
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=365),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=int(os.getenv('REFRESH_TOKEN_LIFETIME_DAYS', '60'))),
     'ROTATE_REFRESH_TOKENS': False,
     'BLACKLIST_AFTER_ROTATION': False,
     'ALGORITHM': 'HS256',
@@ -375,3 +381,26 @@ CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', os.getenv('REDIS_URL'
 CELERY_TASK_ALWAYS_EAGER = os.getenv('CELERY_TASK_ALWAYS_EAGER', 'false').lower() in ('true','1','yes')
 CELERY_TASK_TIME_LIMIT = int(os.getenv('CELERY_TASK_TIME_LIMIT', '3600'))           # 硬超时 60min
 CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv('CELERY_TASK_SOFT_TIME_LIMIT', '3300')) # 软超时 55min
+# 转码任务单独队列，避免阻塞默认队列
+CELERY_TASK_DEFAULT_QUEUE = 'default'
+CELERY_TASK_QUEUES = (
+    Queue('default', routing_key='default.#'),
+    Queue('transcode', routing_key='transcode.#'),
+)
+CELERY_TASK_ROUTES = {
+    'tasks.transcode_video_to_hls': {'queue': 'transcode', 'routing_key': 'transcode.hls'},
+}
+
+if (not DEBUG) and (not os.getenv('CORS_ALLOWED_ORIGINS')):
+    CORS_ALLOWED_ORIGINS = []
+    CORS_ALLOW_CREDENTIALS = False
+
+if not DEBUG:
+    SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000'))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'true').lower() in ('true','1','yes')
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    if os.getenv('USE_X_FORWARDED_PROTO', 'true').lower() in ('true','1','yes'):
+        SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')

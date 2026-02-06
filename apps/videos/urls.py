@@ -15,6 +15,10 @@ urlpatterns = [
     path('upload/status/', views.UploadStatusView.as_view(), name='upload-status'),
     path('upload/complete/', views.UploadCompleteView.as_view(), name='upload-complete'),
     path('list/', views.VideoListView.as_view(), name='list'),
+    path('<uuid:pk>/thumbnail/pick/', views.VideoThumbnailPickView.as_view(), name='thumb-pick'),
+    path('<uuid:pk>/thumbnail/upload/', views.VideoThumbnailUploadView.as_view(), name='thumb-upload'),
+    path('<uuid:pk>/retry-transcode/', views.VideoRetryTranscodeView.as_view(), name='retry-transcode'),
     path('<uuid:pk>/', views.VideoDetailView.as_view(), name='detail'),
     path('bulk-delete/', views.VideoBulkDeleteView.as_view(), name='bulk-delete'),
+    path('bulk-update/', views.VideoBulkUpdateView.as_view(), name='bulk-update'),
 ]
