@@ -4,6 +4,7 @@
 可结合 DRF 的 APIView/ViewSet 来定义接口，并在 urls 中进行路由绑定。
 """
 
+from django.db import models
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
 from django.contrib.postgres.search import TrigramSimilarity
@@ -56,6 +57,12 @@ logger = logging.getLogger(__name__)
 #     ...
 
 
+from drf_spectacular.utils import extend_schema, extend_schema_view
+from apps.users.serializers import UserPublicSerializer, UserMeSerializer
+
+@extend_schema_view(
+    post=extend_schema(responses={201: UserPublicSerializer}),
+)
 class RegisterView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_scope = 'register'
@@ -68,9 +75,25 @@ class RegisterView(APIView):
         return Response(data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema_view(
+    get=extend_schema(responses={200: UserMeSerializer}),
+    patch=extend_schema(request=UserMeSerializer, responses={200: UserMeSerializer}),
+    put=extend_schema(request=UserMeSerializer, responses={200: UserMeSerializer}),
+)
 class MeView(APIView):
     def get(self, request):
-        data = UserMeSerializer(request.user).data
+        user = request.user
+        # 实时计算汇总数据，确保统计准确
+        stats = Video.objects.filter(user=user).aggregate(
+            total_likes=models.Sum('like_count'),
+            total_views=models.Sum('view_count'),
+            total_videos=models.Count('id')
+        )
+        user.total_likes_received = stats['total_likes'] or 0
+        user.total_views_received = stats['total_views'] or 0
+        user.video_count = stats['total_videos'] or 0
+        
+        data = UserMeSerializer(user).data
         return Response(data)
 
     def patch(self, request):
@@ -178,11 +201,27 @@ class ContactSubmitView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@extend_schema_view(
+    get=extend_schema(responses={200: UserPublicSerializer}),
+)
 class UserDetailView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, pk):
         user = get_object_or_404(User, pk=pk)
+        
+        # 实时计算汇总数据，确保统计准确
+        stats = Video.objects.filter(user=user).aggregate(
+            total_likes=models.Sum('like_count'),
+            total_views=models.Sum('view_count'),
+            total_videos=models.Count('id')
+        )
+        
+        # 更新用户对象（可选，此处直接注入 data 即可）
+        user.total_likes_received = stats['total_likes'] or 0
+        user.total_views_received = stats['total_views'] or 0
+        user.video_count = stats['total_videos'] or 0
+        
         data = UserPublicSerializer(user).data
         return Response(data)
 
@@ -618,13 +657,15 @@ class UserPopupStatsView(APIView):
                     return qs.count()
                 except (DatabaseError, Exception):  # 容错：库未迁移或临时异常时不阻断
                     return 0
-            likes_count = safe_count(Like.objects.filter(user=user))
+
+            # 获赞总数应该是用户所有视频的 like_count 之和
+            total_likes_received = Video.objects.filter(user=user).aggregate(total=models.Sum('like_count'))['total'] or 0
             favorites_count = safe_count(Favorite.objects.filter(user=user))
             watch_later_count = safe_count(WatchLater.objects.filter(user=user))
             my_works_count = safe_count(Video.objects.filter(user=user))
             data = default_data()
             data.update({
-                'likes_count': likes_count,
+                'likes_count': total_likes_received,
                 'favorites_count': favorites_count,
                 'watch_later_count': watch_later_count,
                 'my_works_count': my_works_count,
@@ -1022,20 +1063,16 @@ class QrLoginStatusView(APIView):
         data = cache.get(key)
         if not data:
             return Response({'status': 'pending'})
-        # 同源校验：若创建时绑定了 ip/ua，仅允许相同来源获取已确认的令牌
-        try:
-            ip = (request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip() or request.META.get('REMOTE_ADDR') or 'unknown').lower()
-        except Exception:
-            ip = 'unknown'
-        ua = (request.META.get('HTTP_USER_AGENT') or '')[:200]
-        b_ip = data.get('ip')
-        b_ua = data.get('ua')
-        if b_ip and b_ua and (ip != b_ip or ua != b_ua):
-            return Response({'status': 'pending'})
+        
         if data.get('status') == 'confirmed':
             # 一次性消费，避免重复获取令牌
             cache.delete(key)
-            return Response({'status': 'confirmed', 'access': data.get('access'), 'refresh': data.get('refresh')})
+            return Response({
+                'status': 'confirmed', 
+                'access': data.get('access'), 
+                'refresh': data.get('refresh'),
+                'user': data.get('user')
+            })
         return Response({'status': 'pending'})
 
 
@@ -1056,9 +1093,21 @@ class QrLoginConfirmView(APIView):
         data = cache.get(f"qr_login:{session}")
         if not data:
             raise ValidationError({'detail': '会话不存在或已过期'})
+        
         user: User = request.user
         refresh = RefreshToken.for_user(user)
-        cache.set(f"qr_login:{session}", {'status': 'confirmed', 'access': str(refresh.access_token), 'refresh': str(refresh)}, timeout=60)
+        
+        # 写入确认状态和令牌
+        cache.set(f"qr_login:{session}", {
+            'status': 'confirmed', 
+            'access': str(refresh.access_token), 
+            'refresh': str(refresh),
+            'user': {
+                'id': str(user.id),
+                'username': user.username,
+                'nickname': user.nickname
+            }
+        }, timeout=60)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def get(self, request):

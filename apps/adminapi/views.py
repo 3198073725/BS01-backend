@@ -48,6 +48,12 @@ def _audit(request, verb: str, target_type: str | None = None, target_id: str | 
     except Exception:
         pass
 
+from drf_spectacular.utils import extend_schema, extend_schema_view
+from apps.users.serializers import UserMeSerializer, UserFollowListSerializer
+
+@extend_schema_view(
+    get=extend_schema(responses={200: UserFollowListSerializer(many=True)}),
+)
 class AdminUsersListView(APIView):
     permission_classes = [permissions.IsAdminUser]
 
@@ -97,6 +103,9 @@ class AdminUsersListView(APIView):
         return Response(p.format(data, total))
 
 
+@extend_schema_view(
+    get=extend_schema(responses={200: UserMeSerializer}),
+)
 class AdminUserDetailView(APIView):
     permission_classes = [permissions.IsAdminUser]
 

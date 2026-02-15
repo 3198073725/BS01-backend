@@ -55,6 +55,8 @@ INSTALLED_APPS = [
 
     # 第三方应用
     'rest_framework',
+    'drf_spectacular',
+    'drf_spectacular_sidecar',
     'django.contrib.postgres',
     'corsheaders',
 
@@ -75,6 +77,7 @@ INSTALLED_APPS = [
 # 中间件：执行顺序很重要。CORS 应位于 CommonMiddleware 之前，认证类要在 CSRF 之后
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -89,14 +92,17 @@ CORS_ALLOWED_ORIGINS = [
     'http://localhost:5173',
     'http://127.0.0.1:5173',
     'http://localhost:8080',
-    'http://127.0.0.1:8080',
     'http://localhost:8081',
+    'http://mobile.bs01.local:8081',
+    'http://127.0.0.1:8080',
     'http://127.0.0.1:8081',
     'http://localhost:8082',
     'http://127.0.0.1:8082',
     'http://localhost:8090',
     'http://127.0.0.1:8090',
     'http://192.168.183.131:8080',
+    'http://192.168.183.131:5173',
+    'http://mobile.bs01.local:5173',
 ]
 # allow override via env (comma-separated)
 if os.getenv('CORS_ALLOWED_ORIGINS'):
@@ -105,6 +111,7 @@ if os.getenv('CORS_ALLOWED_ORIGINS'):
 CSRF_TRUSTED_ORIGINS = [
     'http://localhost:5173',
     'http://127.0.0.1:5173',
+    'http://mobile.bs01.local:5173',
     'http://localhost:8080',
     'http://127.0.0.1:8080',
     'http://localhost:8081',
@@ -190,6 +197,18 @@ REST_FRAMEWORK = {
     },
     # 统一异常处理（错误返回结构统一）
     'EXCEPTION_HANDLER': 'backend.api_exceptions.custom_exception_handler',
+    # OpenAPI schema generation
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'BS01 API',
+    'DESCRIPTION': 'BS01 后端业务接口文档',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'SWAGGER_UI_DIST': 'SIDECAR',
+    'SWAGGER_UI_FAVICON_HREF': 'SIDECAR',
+    'REDOC_DIST': 'SIDECAR',
 }
 
 # 自定义用户模型
@@ -404,3 +423,6 @@ if not DEBUG:
     CSRF_COOKIE_SECURE = True
     if os.getenv('USE_X_FORWARDED_PROTO', 'true').lower() in ('true','1','yes'):
         SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# 解决在非 HTTPS 环境下 Redoc/Swagger 的 COOP 报错问题
+SECURE_CROSS_ORIGIN_OPENER_POLICY = None

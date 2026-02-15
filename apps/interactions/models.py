@@ -12,16 +12,18 @@ class Like(models.Model):
     """点赞 - 对应 interactions_like 表"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False, verbose_name="点赞ID")
     user = models.ForeignKey('users.User', on_delete=models.CASCADE, db_column='user_id', related_name='likes', verbose_name="用户")
-    video = models.ForeignKey('videos.Video', on_delete=models.CASCADE, db_column='video_id', related_name='likes', verbose_name="视频")
+    video = models.ForeignKey('videos.Video', on_delete=models.CASCADE, null=True, blank=True, db_column='video_id', related_name='likes', verbose_name="视频")
+    comment = models.ForeignKey('interactions.Comment', on_delete=models.CASCADE, null=True, blank=True, db_column='comment_id', related_name='likes', verbose_name="评论")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
 
     class Meta:
         db_table = 'interactions_like'
         managed = True
-        unique_together = (('user', 'video'),)
+        unique_together = (('user', 'video'), ('user', 'comment'),)
         indexes = [
             models.Index(fields=['user'], name='idx_like_user'),
             models.Index(fields=['video'], name='idx_like_video'),
+            models.Index(fields=['comment'], name='idx_like_comment'),
         ]
         verbose_name = "点赞"
         verbose_name_plural = "点赞"

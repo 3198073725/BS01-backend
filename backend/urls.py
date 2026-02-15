@@ -23,6 +23,7 @@ from django.views.static import serve as static_serve
 from rest_framework_simplejwt.views import (
     TokenVerifyView,
 )
+from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 from apps.users.views import TokenObtainPairViewWithCooldown, TokenRefreshViewWithRevoke
 import os
 
@@ -52,6 +53,11 @@ urlpatterns = [
     path('api/token/', TokenObtainPairViewWithCooldown.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshViewWithRevoke.as_view(), name='token_refresh'),
     path('api/token/verify/', TokenVerifyView.as_view(), name='token_verify'),
+
+    # API Documentation
+    path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
+    path('api/schema/swagger-ui/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
+    path('api/schema/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
 ]
 
 if settings.DEBUG or str(os.getenv('SERVE_MEDIA', 'false')).lower() in ('true','1','yes'):
@@ -63,3 +69,6 @@ if settings.DEBUG or str(os.getenv('SERVE_MEDIA', 'false')).lower() in ('true','
             'show_indexes': False,
         }),
     ]
+
+# Serve static files in production (for API docs, etc.)
+urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)

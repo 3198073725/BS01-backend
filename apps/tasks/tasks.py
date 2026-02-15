@@ -36,6 +36,30 @@ def _vid_key_from_rel(rel: str) -> str:
     return os.path.splitext(os.path.basename(rel))[0]
 
 
+def _safe_rm(path: str) -> None:
+    try:
+        if os.path.isdir(path):
+            for root, dirs, files in os.walk(path, topdown=False):
+                for name in files:
+                    try:
+                        os.remove(os.path.join(root, name))
+                    except Exception:
+                        pass
+                for name in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, name))
+                    except Exception:
+                        pass
+            try:
+                os.rmdir(path)
+            except Exception:
+                pass
+        elif os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
 def _probe_video(file_path: str) -> tuple[int, int, int]:
     try:
         cmd = [
@@ -71,6 +95,16 @@ def generate_vtt_and_thumbnail(self, video_id: str) -> dict:
     video_abs = os.path.join(settings.MEDIA_ROOT, video_rel)
     if not os.path.exists(video_abs):
         return {'ok': False, 'error': 'video_file_missing'}
+
+    try:
+        vtt_rel_cleanup = f"videos/thumbs/{vid_key}.vtt"
+        vtt_abs_cleanup = os.path.join(settings.MEDIA_ROOT, vtt_rel_cleanup)
+        frames_rel_dir_cleanup = f"videos/thumbs/{vid_key}_vtt"
+        frames_dir_cleanup = os.path.join(settings.MEDIA_ROOT, frames_rel_dir_cleanup)
+        _safe_rm(vtt_abs_cleanup)
+        _safe_rm(frames_dir_cleanup)
+    except Exception:
+        pass
 
     # Backfill basic metadata if missing
     width = int(getattr(v, 'width', 0) or 0)
@@ -146,7 +180,6 @@ def generate_vtt_and_thumbnail(self, video_id: str) -> dict:
                 start = idx * interval
                 end = min((idx + 1) * interval, duration or ((idx + 1) * interval))
                 f.write(f"{_format_ts(start)} --> {_format_ts(end)}\n")
-                # Use path relative to the VTT file location to avoid absolute host coupling
                 rel_to_vtt = f"{vid_key}_vtt/{name}"
                 f.write(f"{rel_to_vtt}\n\n")
         return {'ok': True, 'vtt_rel': vtt_rel, 'meta_updated': True}
@@ -171,6 +204,14 @@ def transcode_video_to_hls(self, video_id: str) -> dict:
     video_abs = os.path.join(settings.MEDIA_ROOT, video_rel)
     if not os.path.exists(video_abs):
         return {'ok': False, 'error': 'video_file_missing'}
+
+    try:
+        out_dir_cleanup = os.path.join(settings.MEDIA_ROOT, 'videos', 'hls', vid_key)
+        _safe_rm(out_dir_cleanup)
+        low_abs_cleanup = os.path.join(settings.MEDIA_ROOT, 'videos', 'low', f"{vid_key}.mp4")
+        _safe_rm(low_abs_cleanup)
+    except Exception:
+        pass
 
     width = int(v.width or 0)
     height = int(v.height or 0)

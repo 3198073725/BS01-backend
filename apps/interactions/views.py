@@ -595,6 +595,12 @@ class WatchLaterToggleView(APIView):
         return Response({'saved': saved, 'watch_later_count': int(count)})
 
 
+from drf_spectacular.utils import extend_schema, extend_schema_view
+from .serializers import CommentSerializer, HistorySerializer
+
+@extend_schema_view(
+    post=extend_schema(request=HistorySerializer, responses={200: serializers.Serializer({'ok': serializers.BooleanField(), 'progress': serializers.FloatField(), 'watch_duration': serializers.IntegerField()})}),
+)
 class HistoryRecordView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_scope = 'history'
@@ -696,11 +702,22 @@ class HistoryRecordView(APIView):
 class CommentSerializer(serializers.ModelSerializer):
     user = serializers.SerializerMethodField()
     replies_count = serializers.IntegerField(read_only=True)
+    is_liked = serializers.SerializerMethodField()
+    like_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Comment
-        fields = ['id', 'content', 'user', 'video', 'parent', 'created_at', 'updated_at', 'replies_count']
-        read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'replies_count']
+        fields = ['id', 'content', 'user', 'video', 'parent', 'created_at', 'updated_at', 'replies_count', 'is_liked', 'like_count']
+        read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'replies_count', 'is_liked', 'like_count']
+
+    def get_is_liked(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return Like.objects.filter(user=request.user, comment=obj).exists()
+        return False
+
+    def get_like_count(self, obj):
+        return Like.objects.filter(comment=obj).count()
 
     def get_user(self, obj):
         u = getattr(obj, 'user', None)
@@ -752,6 +769,10 @@ class CommentCreateSerializer(serializers.Serializer):
     parent_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
+@extend_schema_view(
+    get=extend_schema(responses={200: CommentSerializer(many=True)}),
+    post=extend_schema(request=CommentCreateSerializer, responses={201: CommentSerializer}),
+)
 class CommentsListCreateView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_scope = 'comments'
@@ -811,6 +832,9 @@ class CommentsListCreateView(APIView):
         return Response(ser.data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema_view(
+    get=extend_schema(responses={200: CommentSerializer(many=True)}),
+)
 class CommentRepliesListView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -846,6 +870,9 @@ class CommentRepliesListView(APIView):
                          'has_next': p.page.has_next()})
 
 
+@extend_schema_view(
+    delete=extend_schema(responses={200: serializers.Serializer({'success': serializers.BooleanField()})}),
+)
 class CommentDetailView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_scope = 'comments'
@@ -856,6 +883,29 @@ class CommentDetailView(APIView):
             raise PermissionDenied('无权删除该评论')
         c.delete()
         return Response({'success': True})
+
+
+class CommentLikeToggleView(APIView):
+    """评论点赞切换接口"""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        comment = get_object_or_404(Comment, pk=pk)
+        obj = Like.objects.filter(user=request.user, comment=comment).first()
+        liked = False
+        if obj:
+            obj.delete()
+            liked = False
+        else:
+            try:
+                Like.objects.create(user=request.user, comment=comment, video=None)
+                liked = True
+            except IntegrityError:
+                liked = True
+        
+        # 统计当前评论的点赞数
+        count = Like.objects.filter(comment=comment).count()
+        return Response({'liked': liked, 'count': int(count)})
 
 
 class NotificationActorSerializer(serializers.Serializer):
@@ -875,15 +925,37 @@ class NotificationItemSerializer(serializers.Serializer):
     comment = serializers.DictField(required=False)
 
 
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import permissions
+from rest_framework.exceptions import ValidationError
+from .models import Notification
+from backend.common.pagination import StandardResultsSetPagination
+
 class NotificationsListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         only_unread = str(request.query_params.get('unread') or '').lower() in ('1','true','yes')
+        ntype = request.query_params.get('type')
         p = StandardResultsSetPagination()
         qs = Notification.objects.filter(user=request.user, hidden=False)
+        
         if only_unread:
             qs = qs.filter(read=False)
+            
+        if ntype:
+            if ntype == 'comment':
+                qs = qs.filter(verb__in=['comment', 'reply'])
+            elif ntype == 'like':
+                qs = qs.filter(verb__in=['like', 'like_video', 'like_comment'])
+            elif ntype == 'at':
+                qs = qs.filter(verb='at')
+            elif ntype == 'system':
+                qs = qs.filter(verb='system')
+            # 如果是其他未知 type，保持原 qs 不变或根据需求处理
+            
         qs = qs.select_related('actor', 'video', 'comment').order_by('-created_at')
         rows = list(p.paginate_queryset(qs, request, view=self))
         out = []
@@ -892,10 +964,13 @@ class NotificationsListView(APIView):
                 actor = getattr(n, 'actor', None)
                 a = None
                 if actor:
+                    # 统一获取展示名称
+                    name = getattr(actor, 'nickname', '') or getattr(actor, 'display_name', '') or getattr(actor, 'username', '') or ''
                     a = {
                         'id': str(actor.id),
                         'username': getattr(actor, 'username', '') or '',
-                        'display_name': getattr(actor, 'display_name', '') or getattr(actor, 'nickname', '') or '',
+                        'nickname': getattr(actor, 'nickname', '') or '',
+                        'display_name': name, # Web端主要依赖此字段
                         'avatar_url': getattr(actor, 'profile_picture_thumb', '') or getattr(actor, 'profile_picture', '') or '',
                     }
                 v = getattr(n, 'video', None)
@@ -904,6 +979,7 @@ class NotificationsListView(APIView):
                     vobj = {
                         'id': str(v.id),
                         'title': v.title,
+                        'thumbnail_url': v.thumbnail_url if hasattr(v, 'thumbnail_url') else '',
                     }
                 c = getattr(n, 'comment', None)
                 cobj = None
@@ -914,6 +990,7 @@ class NotificationsListView(APIView):
                     }
                 out.append({
                     'id': str(n.id),
+                    'type': n.verb,
                     'verb': n.verb,
                     'read': bool(n.read),
                     'created_at': n.created_at,
@@ -928,8 +1005,6 @@ class NotificationsListView(APIView):
                          'page_size': p.get_page_size(request),
                          'total': p.page.paginator.count,
                          'has_next': p.page.has_next()})
-
-
 class NotificationsMarkReadView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 

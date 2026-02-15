@@ -35,6 +35,7 @@ urlpatterns = [
     path('comments/', views.CommentsListCreateView.as_view(), name='comments-list-create'),
     path('comments/replies/', views.CommentRepliesListView.as_view(), name='comments-replies'),
     path('comments/<uuid:pk>/', views.CommentDetailView.as_view(), name='comment-detail'),
+    path('comments/<uuid:pk>/like/', views.CommentLikeToggleView.as_view(), name='comment-like-toggle'),
     # 通知
     path('notifications/', views.NotificationsListView.as_view(), name='notifications-list'),
     path('notifications/mark-read/', views.NotificationsMarkReadView.as_view(), name='notifications-mark-read'),

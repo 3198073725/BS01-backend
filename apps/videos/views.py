@@ -46,6 +46,43 @@ except Exception:
     _PIL_Image = None
 
 
+def _is_owner_or_admin(video: Video, viewer) -> bool:
+    try:
+        if not viewer or not getattr(viewer, 'id', None):
+            return False
+        if getattr(viewer, 'is_staff', False):
+            return True
+        return str(viewer.id) == str(getattr(video, 'user_id', None))
+    except Exception:
+        return False
+
+
+def _can_view_video(video: Video, viewer) -> bool:
+    try:
+        st = getattr(video, 'status', 'draft')
+        if st == 'banned':
+            return bool(viewer and getattr(viewer, 'is_staff', False))
+        if st != 'published' and not _is_owner_or_admin(video, viewer):
+            return False
+        vis = getattr(video, 'visibility', 'public')
+        if vis == 'private' and not _is_owner_or_admin(video, viewer):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _can_edit_video(video: Video, viewer) -> bool:
+    if not _is_owner_or_admin(video, viewer):
+        return False
+    try:
+        if getattr(video, 'status', '') == 'banned' and not getattr(viewer, 'is_staff', False):
+            return False
+    except Exception:
+        return False
+    return True
+
+
 def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
@@ -310,6 +347,12 @@ class VideoUploadView(APIView):
         }, status=status.HTTP_202_ACCEPTED)
 
 
+from drf_spectacular.utils import extend_schema, extend_schema_view
+from .serializers import VideoListSerializer, VideoDetailSerializer
+
+@extend_schema_view(
+    get=extend_schema(responses={200: VideoListSerializer(many=True)}),
+)
 class VideoListView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -323,12 +366,21 @@ class VideoListView(APIView):
         viewer = request.user if (request.user and request.user.is_authenticated) else None
         uid = request.query_params.get('user_id')
         if uid:
-            if not (viewer and (str(viewer.id) == str(uid) or getattr(viewer, 'is_staff', False))):
-                # 访问他人主页：仅展示已发布且公开的视频
-                qs = qs.filter(user_id=uid, status='published', visibility='public')
-            else:
+            # 统一转为字符串比较
+            is_self = False
+            if viewer and hasattr(viewer, 'id'):
+                is_self = (str(viewer.id) == str(uid))
+            
+            is_staff = bool(viewer and getattr(viewer, 'is_staff', False))
+
+            if is_self or is_staff:
                 # 自己或管理员：展示该作者的全部视频（含未发布）
                 qs = qs.filter(user_id=uid)
+                if not is_staff:
+                    qs = qs.exclude(status='banned')
+            else:
+                # 访问他人主页：仅展示已发布且公开的视频
+                qs = qs.filter(user_id=uid, status='published', visibility='public')
         else:
             # 公共列表：仅展示已发布且公开的视频
             qs = qs.filter(status='published', visibility='public')
@@ -467,21 +519,18 @@ class VideoListView(APIView):
         return Response(p.format(data, total))
 
 
+@extend_schema_view(
+    get=extend_schema(responses={200: VideoDetailSerializer}),
+)
 class VideoDetailView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, pk):
         v = get_object_or_404(Video, pk=pk)
         viewer = request.user if (request.user and request.user.is_authenticated) else None
-        is_owner_or_admin = bool(viewer and (str(viewer.id) == str(v.user_id) or getattr(viewer, 'is_staff', False)))
-        # 未发布资源仅作者或管理员可见
-        if getattr(v, 'status', 'draft') != 'published' and not is_owner_or_admin:
+        if not _can_view_video(v, viewer):
             raise NotFound('资源不存在')
-        # 可见性控制：private 仅作者/管理员可见；unlisted 允许直链访问但不出现在列表/推荐
-        vis = getattr(v, 'visibility', 'public')
-        if vis == 'private' and not is_owner_or_admin:
-            raise NotFound('资源不存在')
-        can_edit = is_owner_or_admin
+        can_edit = _can_edit_video(v, viewer)
         base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         def url_of(rel: str) -> str:
@@ -572,7 +621,7 @@ class VideoDetailView(APIView):
         user = getattr(request, 'user', None)
         if not (user and getattr(user, 'id', None)):
             raise NotAuthenticated('未登录')
-        if str(v.user_id) != str(user.id):
+        if not _can_edit_video(v, user):
             raise PermissionDenied('无权编辑该视频')
         data = request.data or {}
         title = data.get('title')
@@ -756,6 +805,8 @@ class VideoBulkDeleteView(APIView):
         if len(ids) > 200:
             raise ValidationError({'video_ids': '一次最多处理 200 个'})
         qs = Video.objects.filter(user=request.user, id__in=ids)
+        if not getattr(request.user, 'is_staff', False):
+            qs = qs.exclude(status='banned')
         removed, _ = qs.delete()
         return Response({'removed': int(removed)})
 
@@ -765,7 +816,7 @@ class VideoThumbnailPickView(APIView):
 
     def post(self, request, pk):
         v = get_object_or_404(Video, pk=pk)
-        if str(v.user_id) != str(getattr(request.user, 'id', '')):
+        if not _can_edit_video(v, request.user):
             raise PermissionDenied('无权编辑该视频')
         # parse ts seconds
         raw = request.data.get('ts') if isinstance(request.data, dict) else None
@@ -811,8 +862,7 @@ class VideoRetryTranscodeView(APIView):
     def post(self, request, pk):
         v = get_object_or_404(Video, pk=pk)
         viewer = request.user
-        is_owner_or_admin = bool(viewer and (str(viewer.id) == str(v.user_id) or getattr(viewer, 'is_staff', False)))
-        if not is_owner_or_admin:
+        if not _can_edit_video(v, viewer):
             raise PermissionDenied('无权操作')
         # 仅允许处理已上传完成的视频
         if not v.video_file:
@@ -836,7 +886,7 @@ class VideoThumbnailUploadView(APIView):
 
     def post(self, request, pk):
         v = get_object_or_404(Video, pk=pk)
-        if str(v.user_id) != str(getattr(request.user, 'id', '')):
+        if not _can_edit_video(v, request.user):
             raise PermissionDenied('无权编辑该视频')
         f = request.FILES.get('file') or request.FILES.get('image')
         if not f:
@@ -920,6 +970,8 @@ class VideoBulkUpdateView(APIView):
         if not updates:
             return Response({'updated': 0})
         qs = Video.objects.filter(user=request.user, id__in=ids)
+        if not getattr(request.user, 'is_staff', False):
+            qs = qs.exclude(status='banned')
         n = qs.update(**updates)
         return Response({'updated': int(n)})
 
