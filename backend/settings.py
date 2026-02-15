@@ -216,10 +216,10 @@ AUTH_USER_MODEL = 'users.User'
 
 # SimpleJWT 配置：令牌有效期、前缀等
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=7),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=int(os.getenv('REFRESH_TOKEN_LIFETIME_DAYS', '60'))),
-    'ROTATE_REFRESH_TOKENS': False,
-    'BLACKLIST_AFTER_ROTATION': False,
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
     'ALGORITHM': 'HS256',
     'SIGNING_KEY': SECRET_KEY,
     'AUTH_HEADER_TYPES': ('Bearer',),  # 客户端请求头格式：Authorization: Bearer <token>
@@ -295,9 +295,9 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # 国际化与本地化
 # 使用简体中文与上海时区；USE_TZ=True 表示以 UTC 存储，按时区展示
-LANGUAGE_CODE = 'zh-hans'
+LANGUAGE_CODE = os.getenv('LANGUAGE_CODE', 'zh-hans')
 
-TIME_ZONE = 'Asia/Shanghai'
+TIME_ZONE = os.getenv('TIME_ZONE', 'Asia/Shanghai')
 
 USE_I18N = True
 

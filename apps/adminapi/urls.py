@@ -36,4 +36,8 @@ urlpatterns = [
 
     # Analytics
     path('analytics/overview/', views.AdminAnalyticsOverviewView.as_view(), name='analytics-overview'),
+
+    # System announcements
+    path('announcements/', views.AdminAnnouncementsListCreateView.as_view(), name='announcements-list-create'),
+    path('announcements/<uuid:pk>/', views.AdminAnnouncementDetailView.as_view(), name='announcements-detail'),
 ]

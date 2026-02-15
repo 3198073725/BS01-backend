@@ -27,6 +27,47 @@ class Notification(models.Model):
         verbose_name_plural = "通知"
 
 
+class SystemAnnouncement(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=200, verbose_name="标题")
+    content = models.TextField(blank=True, default='', verbose_name="内容")
+    is_active = models.BooleanField(default=True, verbose_name="是否发布")
+    pinned = models.BooleanField(default=False, verbose_name="是否置顶")
+    published_at = models.DateTimeField(null=True, blank=True, verbose_name="发布时间")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        db_table = 'system_announcement'
+        managed = True
+        indexes = [
+            models.Index(fields=['is_active', '-published_at'], name='idx_announce_active_pub'),
+            models.Index(fields=['pinned', '-published_at'], name='idx_announce_pinned_pub'),
+        ]
+        verbose_name = "系统公告"
+        verbose_name_plural = "系统公告"
+
+
+class SystemAnnouncementRead(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    announcement = models.ForeignKey(SystemAnnouncement, on_delete=models.CASCADE, db_column='announcement_id', related_name='reads', verbose_name="公告")
+    user = models.ForeignKey('users.User', on_delete=models.CASCADE, db_column='user_id', related_name='announcement_reads', verbose_name="用户")
+    read_at = models.DateTimeField(auto_now_add=True, verbose_name="已读时间")
+
+    class Meta:
+        db_table = 'system_announcement_read'
+        managed = True
+        indexes = [
+            models.Index(fields=['user', 'announcement'], name='idx_announce_read_user'),
+            models.Index(fields=['announcement', 'user'], name='idx_announce_read_ann'),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=['announcement', 'user'], name='uq_announce_user_read'),
+        ]
+        verbose_name = "系统公告已读"
+        verbose_name_plural = "系统公告已读"
+
+
 class WebPushSubscription(models.Model):
     """Web 推送订阅 - 对应 webpush_subscription 表"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

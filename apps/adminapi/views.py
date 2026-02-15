@@ -20,6 +20,7 @@ from apps.users.models import User
 from apps.videos.models import Video, VideoTag
 from apps.interactions.models import Comment, History, Like
 from apps.content.models import AuditLog, Category, Tag
+from apps.notifications.models import SystemAnnouncement
 
 
 def _parse_bool(v) -> bool | None:
@@ -1130,3 +1131,131 @@ class AdminTagsMergeView(APIView):
         except Exception:
             pass
         return Response({'merged': 1, 'moved': moved, 'target': str(target.id)})
+
+
+class AdminAnnouncementsListCreateView(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        p = StandardResultsSetPagination()
+        qs = SystemAnnouncement.objects.all()
+
+        q = (request.query_params.get('q') or '').strip()
+        if q:
+            qs = qs.filter(Q(title__icontains=q) | Q(content__icontains=q))
+
+        v_active = _parse_bool(request.query_params.get('is_active'))
+        if v_active is not None:
+            qs = qs.filter(is_active=v_active)
+
+        order = (request.query_params.get('order') or '').strip().lower()
+        if order == 'oldest':
+            qs = qs.order_by('created_at')
+        else:
+            qs = qs.order_by('-pinned', '-published_at', '-created_at')
+
+        rows = list(p.paginate_queryset(qs, request, view=self))
+        out = []
+        for a in rows:
+            out.append({
+                'id': str(a.id),
+                'title': a.title,
+                'content': a.content,
+                'is_active': bool(a.is_active),
+                'pinned': bool(a.pinned),
+                'published_at': a.published_at,
+                'created_at': a.created_at,
+                'updated_at': a.updated_at,
+            })
+        total = getattr(p.page.paginator, 'count', None)
+        return Response(p.format(out, total))
+
+    def post(self, request):
+        title = (request.data.get('title') or '').strip()
+        content = (request.data.get('content') or '').strip()
+        if not title:
+            raise ValidationError({'title': '标题不能为空'})
+        is_active = bool(_parse_bool(request.data.get('is_active')) if request.data.get('is_active') is not None else True)
+        pinned = bool(_parse_bool(request.data.get('pinned')) if request.data.get('pinned') is not None else False)
+
+        published_at = timezone.now() if is_active else None
+        a = SystemAnnouncement.objects.create(
+            title=title,
+            content=content,
+            is_active=is_active,
+            pinned=pinned,
+            published_at=published_at,
+        )
+        try:
+            _audit(request, 'announcement.create', 'system_announcement', str(a.id), {'is_active': is_active, 'pinned': pinned})
+        except Exception:
+            pass
+        return Response({'id': str(a.id)})
+
+
+class AdminAnnouncementDetailView(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request, pk):
+        a = get_object_or_404(SystemAnnouncement, pk=pk)
+        return Response({
+            'id': str(a.id),
+            'title': a.title,
+            'content': a.content,
+            'is_active': bool(a.is_active),
+            'pinned': bool(a.pinned),
+            'published_at': a.published_at,
+            'created_at': a.created_at,
+            'updated_at': a.updated_at,
+        })
+
+    def patch(self, request, pk):
+        a = get_object_or_404(SystemAnnouncement, pk=pk)
+        changed = {}
+
+        if 'title' in request.data:
+            title = (request.data.get('title') or '').strip()
+            if not title:
+                raise ValidationError({'title': '标题不能为空'})
+            a.title = title
+            changed['title'] = True
+
+        if 'content' in request.data:
+            a.content = (request.data.get('content') or '')
+            changed['content'] = True
+
+        if 'pinned' in request.data:
+            pinned = _parse_bool(request.data.get('pinned'))
+            if pinned is None:
+                raise ValidationError({'pinned': 'pinned 必须为布尔值'})
+            a.pinned = bool(pinned)
+            changed['pinned'] = bool(pinned)
+
+        if 'is_active' in request.data:
+            is_active = _parse_bool(request.data.get('is_active'))
+            if is_active is None:
+                raise ValidationError({'is_active': 'is_active 必须为布尔值'})
+            is_active = bool(is_active)
+            if is_active and not a.is_active:
+                a.published_at = timezone.now()
+            if not is_active:
+                a.published_at = None
+            a.is_active = is_active
+            changed['is_active'] = is_active
+
+        a.save(update_fields=None)
+        try:
+            _audit(request, 'announcement.update', 'system_announcement', str(a.id), changed)
+        except Exception:
+            pass
+        return Response({'ok': True})
+
+    def delete(self, request, pk):
+        a = get_object_or_404(SystemAnnouncement, pk=pk)
+        aid = str(a.id)
+        a.delete()
+        try:
+            _audit(request, 'announcement.delete', 'system_announcement', aid, None)
+        except Exception:
+            pass
+        return Response({'deleted': 1})

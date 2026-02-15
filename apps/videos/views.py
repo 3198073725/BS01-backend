@@ -36,6 +36,7 @@ from backend.common.pagination import StandardResultsSetPagination
 
 from .models import Video, VideoTag
 from apps.interactions.models import Like, Favorite
+from apps.videos.models import WatchLater
 from apps.content.models import Tag, Category
 from apps.tasks.tasks import generate_vtt_and_thumbnail, transcode_video_to_hls
 from django.db.models import Count, Q
@@ -552,16 +553,18 @@ class VideoDetailView(APIView):
         vtt_abs = os.path.join(settings.MEDIA_ROOT, vtt_rel)
         master_rel = f"videos/hls/{os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]}/master.m3u8"
         master_abs = os.path.join(settings.MEDIA_ROOT, master_rel)
-        # 当前用户已点赞/已收藏（未登录则为 False）
+        # 当前用户已点赞/已收藏/已加入稍后看（未登录则为 False）
         liked = False
         favorited = False
+        watch_later = False
         fav_count = 0
         if getattr(request, 'user', None) and getattr(request.user, 'id', None):
             try:
                 liked = Like.objects.filter(user=request.user, video=v).exists()
                 favorited = Favorite.objects.filter(user=request.user, video=v).exists()
+                watch_later = WatchLater.objects.filter(user=request.user, video=v).exists()
             except Exception:
-                liked = False; favorited = False
+                liked = False; favorited = False; watch_later = False
         try:
             fav_count = Favorite.objects.filter(video=v).count()
         except Exception:
@@ -612,6 +615,7 @@ class VideoDetailView(APIView):
             },
             'liked': bool(liked),
             'favorited': bool(favorited),
+            'watch_later': bool(watch_later),
             'category': ({'id': str(v.category.id), 'name': v.category.name} if getattr(v, 'category', None) else None),
             'tags': tags,
         })
