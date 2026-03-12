@@ -27,8 +27,20 @@ class VideoListSerializer(serializers.ModelSerializer):
 
 class VideoDetailSerializer(serializers.ModelSerializer):
     category = CategorySerializer(read_only=True)
-    tags = TagSerializer(many=True, read_only=True, source='video_tags')
+    tags = serializers.SerializerMethodField()
     
     class Meta:
         model = Video
         fields = '__all__'
+
+    def get_tags(self, obj: Video):
+        try:
+            vts = getattr(obj, 'video_tags', None)
+            if vts is None:
+                return []
+            rows = list(vts.select_related('tag').all())
+            tags = [getattr(r, 'tag', None) for r in rows]
+            tags = [t for t in tags if t is not None]
+            return TagSerializer(tags, many=True).data
+        except Exception:
+            return []

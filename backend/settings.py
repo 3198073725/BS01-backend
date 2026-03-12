@@ -98,6 +98,8 @@ CORS_ALLOWED_ORIGINS = [
     'http://127.0.0.1:8081',
     'http://localhost:8082',
     'http://127.0.0.1:8082',
+    'http://admin.bs01.local:8082',
+    'http://admin.bs01.local:8080',
     'http://localhost:8090',
     'http://127.0.0.1:8090',
     'http://192.168.183.131:8080',
@@ -118,6 +120,8 @@ CSRF_TRUSTED_ORIGINS = [
     'http://127.0.0.1:8081',
     'http://localhost:8082',
     'http://127.0.0.1:8082',
+    'http://admin.bs01.local:8082',
+    'http://admin.bs01.local:8080',
     'http://localhost:8090',
     'http://127.0.0.1:8090',
 ]
@@ -309,8 +313,8 @@ USE_TZ = True
 # 生产环境通常由 Nginx/对象存储提供静态与媒体文件；Django 仅在 DEBUG 模式下提供
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL = os.getenv('MEDIA_URL', '/media/')
+MEDIA_ROOT = Path(os.getenv('MEDIA_ROOT', str(BASE_DIR / 'media')))
 
 # Cache configuration: prefer Redis if configured, else fallback to locmem
 REDIS_URL = os.getenv('REDIS_URL', '')

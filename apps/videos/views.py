@@ -47,6 +47,26 @@ except Exception:
     _PIL_Image = None
 
 
+def _load_upload_meta_or_403(request, sess: str) -> dict:
+    meta_path = os.path.join(sess, 'meta.json')
+    if not os.path.exists(meta_path):
+        raise ValidationError({'detail': '会话不存在'})
+    try:
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            meta = json.load(f)
+    except Exception:
+        raise ValidationError({'detail': '会话数据损坏'})
+    try:
+        owner = str(meta.get('user_id') or '')
+        me = str(getattr(getattr(request, 'user', None), 'id', '') or '')
+    except Exception:
+        owner = ''
+        me = ''
+    if (not owner) or (not me) or owner != me:
+        raise PermissionDenied('无权限访问该上传会话')
+    return meta
+
+
 def _is_owner_or_admin(video: Video, viewer) -> bool:
     try:
         if not viewer or not getattr(viewer, 'id', None):
@@ -195,7 +215,7 @@ def _make_vtt_thumbnails(file_path: str, vid_key: str, duration: int, base: str,
                 start = idx * interval
                 end = min((idx + 1) * interval, duration or ((idx + 1) * interval))
                 f.write(f"{_format_ts(start)} --> {_format_ts(end)}\n")
-                url = _build_media_url(base, media, f"{frames_rel_dir}/{name}")
+                url = _build_media_url(base or '', media, f"{frames_rel_dir}/{name}")
                 f.write(f"{url}\n\n")
         return vtt_rel
     except Exception:
@@ -310,11 +330,11 @@ class VideoUploadView(APIView):
                 except Exception:
                     pass
 
-        # 元数据探测与缩略图
-        width, height, duration = 0, 0, 0
-        thumb_exists = False
+        # 元数据探测与缩略图（同步补齐首日可用性）
+        width, height, duration = _probe_video(video_abs)
+        thumb_exists = _make_thumbnail(video_abs, thumb_abs, ts_sec=max(1, int((duration or 0) // 2) if duration else 1))
 
-        # 创建视频记录（先直接发布，后续可接入转码任务）
+        # 创建视频记录
         v = Video.objects.create(
             title=(request.data.get('title') or os.path.splitext(name)[0] or '未命名视频')[:200],
             description=request.data.get('description') or '',
@@ -322,9 +342,9 @@ class VideoUploadView(APIView):
             thumbnail=thumb_rel[:100] if thumb_exists else None,
             video_file_f=video_rel[:200],
             thumbnail_f=(thumb_rel[:200] if thumb_exists else None),
-            duration=duration or 0,
-            width=width or 0,
-            height=height or 0,
+            duration=int(duration or 0),
+            width=int(width or 0),
+            height=int(height or 0),
             file_size=int(file.size or 0),
             status='processing',
             upload_status='completed',
@@ -1021,9 +1041,7 @@ class UploadChunkView(APIView):
         if not upload_id or f is None:
             raise ValidationError({'detail': '缺少参数'})
         sess = os.path.join(settings.MEDIA_ROOT, 'uploads', 'sessions', upload_id)
-        meta_path = os.path.join(sess, 'meta.json')
-        if not os.path.exists(meta_path):
-            raise ValidationError({'detail': '会话不存在'})
+        meta = _load_upload_meta_or_403(request, sess)
         os.makedirs(os.path.join(sess, 'chunks'), exist_ok=True)
         out = os.path.join(sess, 'chunks', f'{idx}.part')
         with open(out, 'wb+') as dst:
@@ -1041,11 +1059,7 @@ class UploadStatusView(APIView):
         if not upload_id:
             raise ValidationError({'detail': '缺少 id'})
         sess = os.path.join(settings.MEDIA_ROOT, 'uploads', 'sessions', upload_id)
-        meta_path = os.path.join(sess, 'meta.json')
-        if not os.path.exists(meta_path):
-            raise ValidationError({'detail': '会话不存在'})
-        with open(meta_path, 'r', encoding='utf-8') as f:
-            meta = json.load(f)
+        meta = _load_upload_meta_or_403(request, sess)
         chunk_dir = os.path.join(sess, 'chunks')
         have = []
         if os.path.isdir(chunk_dir):
@@ -1072,11 +1086,7 @@ class UploadCompleteView(APIView):
         if not upload_id:
             raise ValidationError({'detail': '缺少 upload_id'})
         sess = os.path.join(settings.MEDIA_ROOT, 'uploads', 'sessions', upload_id)
-        meta_path = os.path.join(sess, 'meta.json')
-        if not os.path.exists(meta_path):
-            raise ValidationError({'detail': '会话不存在'})
-        with open(meta_path, 'r', encoding='utf-8') as f:
-            meta = json.load(f)
+        meta = _load_upload_meta_or_403(request, sess)
         chunk_dir = os.path.join(sess, 'chunks')
         total = int(math.ceil(meta['filesize'] / float(meta['chunk_size'])))
         missing = [i for i in range(total) if not os.path.exists(os.path.join(chunk_dir, f'{i}.part'))]
@@ -1098,9 +1108,9 @@ class UploadCompleteView(APIView):
         video_abs = os.path.join(settings.MEDIA_ROOT, video_rel)
         os.replace(tmp_merged, video_abs)
         thumb_rel = f"videos/thumbs/{vid}.jpg"; thumb_abs = os.path.join(settings.MEDIA_ROOT, thumb_rel)
-        # 元数据探测与缩略图
-        width, height, duration = 0, 0, 0
-        thumb_exists = False
+        # 元数据探测与缩略图（同步补齐首日可用性）
+        width, height, duration = _probe_video(video_abs)
+        thumb_exists = _make_thumbnail(video_abs, thumb_abs, ts_sec=max(1, int((duration or 0) // 2) if duration else 1))
         v = Video.objects.create(
             title=(title or os.path.splitext(meta['filename'])[0] or '未命名视频')[:200],
             description=description or '',
@@ -1108,9 +1118,9 @@ class UploadCompleteView(APIView):
             thumbnail=thumb_rel[:100] if thumb_exists else None,
             video_file_f=video_rel[:200],
             thumbnail_f=(thumb_rel[:200] if thumb_exists else None),
-            duration=duration or 0,
-            width=width or 0,
-            height=height or 0,
+            duration=int(duration or 0),
+            width=int(width or 0),
+            height=int(height or 0),
             file_size=int(meta['filesize'] or 0),
             status='processing',
             upload_status='completed',
@@ -1130,4 +1140,7 @@ class UploadCompleteView(APIView):
             'task_ids': [t1.id, t2.id],
             'video_url': (f"{media}/{video_rel}" if media.startswith('http://') or media.startswith('https://') else (f"{base}{media}/{video_rel}" if media.startswith('/') else f"{base}/{media}/{video_rel}")),
             'thumbnail_url': ((f"{media}/{thumb_rel}" if media.startswith('http://') or media.startswith('https://') else (f"{base}{media}/{thumb_rel}" if media.startswith('/') else f"{base}/{media}/{thumb_rel}"))) if thumb_exists else None,
+            'duration': v.duration,
+            'width': v.width,
+            'height': v.height,
         }, status=status.HTTP_202_ACCEPTED)

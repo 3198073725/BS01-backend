@@ -60,7 +60,7 @@ urlpatterns = [
     path('api/schema/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
 ]
 
-if settings.DEBUG or str(os.getenv('SERVE_MEDIA', 'false')).lower() in ('true','1','yes'):
+if settings.DEBUG or str(os.getenv('SERVE_MEDIA', 'true')).lower() in ('true','1','yes'):
     # 使用 Django 提供的静态文件视图服务媒体文件（仅开发/内网调试场景）
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
     urlpatterns += [
