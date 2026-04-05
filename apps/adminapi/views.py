@@ -1640,7 +1640,7 @@ class AdminSwitchUserView(APIView):
         target_user_id = request.data.get('target_user_id')  # 可选，如果提供则直接切换
         
         if not admin_username or not admin_password:
-            raise ValidationError({'detail': '请输入管理员用户名和密码'})
+            raise ValidationError({'code': 'missing_credentials', 'detail': '请输入管理员用户名和密码'})
 
         # 验证管理员凭据
         from django.contrib.auth import authenticate
