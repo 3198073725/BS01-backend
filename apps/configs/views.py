@@ -67,6 +67,8 @@ SYSTEM_CONFIG_SCHEMA = {
             'home_layout': {'type': 'select', 'label': '首页布局', 'default': 'grid', 'options': ['grid', 'waterfall', 'single'], 'help': 'grid=宫格, waterfall=瀑布流, single=单列大图'},
             'recommend_algorithm': {'type': 'select', 'label': '推荐算法', 'default': 'latest', 'options': ['latest', 'hot', 'random'], 'help': 'latest=最新优先, hot=最热优先, random=随机散播'},
             'max_upload_size_mb': {'type': 'int', 'label': '最大上传限制(MB)', 'default': 500, 'help': '视频文件最大允许上传大小'},
+            'featured_video_ids': {'type': 'string', 'label': '热门推荐视频ID列表', 'default': '', 'help': '每行一个视频ID，按优先级排序'},
+            'featured_limit': {'type': 'int', 'label': '热门推荐显示数量', 'default': 10, 'help': '热门推荐区最多显示的视频数量（1-20）'},
         }
     },
     # 用户注册/认证

@@ -1714,3 +1714,42 @@ class AdminImpersonateExitView(APIView):
     def post(self, request):
         # 前端保存原始管理员token，退出时恢复
         return Response({'ok': True})
+
+
+class AdminVideoRetryTranscodeView(APIView):
+    """管理员转码重试（使用 IsReviewer 权限）
+
+    - 方法：POST /api/admin/videos/<pk>/retry-transcode/
+    - 权限：审核员及以上
+    """
+    permission_classes = [IsReviewer]
+
+    def post(self, request, pk):
+        from apps.videos.models import Video
+        from apps.tasks.tasks import generate_vtt_and_thumbnail, transcode_video_to_hls
+
+        v = get_object_or_404(Video, pk=pk)
+
+        # 仅允许处理已上传完成的视频
+        if not v.video_file:
+            raise ValidationError({'detail': '视频文件缺失，无法重试'})
+
+        # 清理状态与错误信息
+        v.status = 'processing'
+        v.transcode_error = None
+        try:
+            v.save(update_fields=['status', 'transcode_error', 'updated_at'])
+        except Exception:
+            v.save()
+
+        # 触发转码与缩略图任务
+        t1 = generate_vtt_and_thumbnail.delay(str(v.id))
+        t2 = transcode_video_to_hls.delay(str(v.id))
+
+        # 记录审计日志
+        try:
+            _audit(request, 'video.retry_transcode', 'video', str(v.id), None)
+        except Exception:
+            pass
+
+        return Response({'status': 'processing', 'id': str(v.id), 'task_ids': [t1.id, t2.id]})

@@ -9,6 +9,7 @@ urlpatterns = [
     path('users/<uuid:pk>/force-logout/', views.AdminUserForceLogoutView.as_view(), name='users-force-logout'),
 
     path('videos/', views.AdminVideosListView.as_view(), name='videos-list'),
+    path('videos/<uuid:pk>/retry-transcode/', views.AdminVideoRetryTranscodeView.as_view(), name='videos-retry-transcode'),
     path('videos/<uuid:pk>/', views.AdminVideoDetailView.as_view(), name='videos-detail'),
     path('videos/bulk-update/', views.AdminVideosBulkUpdateView.as_view(), name='videos-bulk-update'),
     path('videos/bulk-delete/', views.AdminVideosBulkDeleteView.as_view(), name='videos-bulk-delete'),
