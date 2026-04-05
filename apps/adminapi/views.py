@@ -1625,12 +1625,12 @@ class AdminReportHandleView(APIView):
 
 
 class AdminSwitchUserView(APIView):
-    """切换用户（管理员模拟登录）
+    """切换管理员账号（超级管理员/管理员切换到其他管理员账号）
 
     - 方法：POST /api/admin/switch-user/
     - 权限：需验证管理员凭据
     - 参数：admin_username, admin_password
-    - 返回：可切换的用户列表（版主及以上权限）
+    - 返回：可切换的管理员账号列表
     """
     permission_classes = [permissions.AllowAny]  # 手动验证凭据
 
@@ -1649,14 +1649,17 @@ class AdminSwitchUserView(APIView):
         if not admin_user or not getattr(admin_user, 'is_staff', False):
             raise PermissionDenied('管理员凭据无效')
         
-        # 检查管理员角色权限（至少需要版主级别才能切换用户）
+        # 检查管理员角色权限（至少需要管理员级别才能切换其他管理员账号）
         admin_role = getattr(admin_user, 'admin_role', 'none')
-        if admin_role not in ['moderator', 'admin', 'super_admin']:
-            raise PermissionDenied('权限不足，需要版主及以上权限')
+        if admin_role not in ['admin', 'super_admin']:
+            raise PermissionDenied('权限不足，需要管理员或超级管理员权限')
 
         # 如果提供了目标用户ID，直接执行切换
         if target_user_id:
             target_user = get_object_or_404(User, pk=target_user_id)
+            # 确保目标是管理员
+            if not getattr(target_user, 'is_staff', False):
+                raise PermissionDenied('目标用户不是管理员')
             from rest_framework_simplejwt.tokens import RefreshToken
             refresh = RefreshToken.for_user(target_user)
             return Response({
@@ -1668,18 +1671,26 @@ class AdminSwitchUserView(APIView):
                     'nickname': target_user.nickname,
                     'is_staff': target_user.is_staff,
                     'is_superuser': target_user.is_superuser,
+                    'admin_role': getattr(target_user, 'admin_role', 'none'),
                 },
                 'switched': True,
                 'by_admin': admin_user.username,
             })
 
-        # 否则返回可切换的用户列表
-        # 超级管理员可以切换到任何用户，其他管理员只能切换到普通用户
+        # 返回可切换的管理员账号列表
+        # 超级管理员可以切换到任何管理员，其他管理员只能切换到非超级管理员
         if admin_role == 'super_admin':
-            switchable_users = User.objects.all().order_by('username')
+            # 超级管理员可以看到所有管理员（除了自己）
+            switchable_users = User.objects.filter(
+                is_staff=True,
+                admin_role__in=['reviewer', 'moderator', 'admin', 'super_admin']
+            ).exclude(id=admin_user.id).order_by('admin_role', 'username')
         else:
-            # 非超级管理员只能切换到非管理员用户
-            switchable_users = User.objects.filter(is_staff=False).order_by('username')
+            # 普通管理员只能切换到审核员、版主、管理员（不能切换到超级管理员，也不能切换到自己）
+            switchable_users = User.objects.filter(
+                is_staff=True,
+                admin_role__in=['reviewer', 'moderator', 'admin']
+            ).exclude(id=admin_user.id).order_by('admin_role', 'username')
         
         users_data = []
         for u in switchable_users[:100]:  # 限制返回数量
