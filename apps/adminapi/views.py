@@ -1625,92 +1625,50 @@ class AdminReportHandleView(APIView):
 
 
 class AdminSwitchUserView(APIView):
-    """切换管理员账号（超级管理员/管理员切换到其他管理员账号）
+    """切换管理员账号（直接登录到另一个管理员账号）
 
     - 方法：POST /api/admin/switch-user/
-    - 权限：需验证管理员凭据
-    - 参数：admin_username, admin_password
-    - 返回：可切换的管理员账号列表
+    - 权限：需验证目标管理员凭据
+    - 参数：target_username（目标管理员用户名）, target_password（目标管理员密码）
+    - 返回：登录后的 token
     """
-    permission_classes = [permissions.AllowAny]  # 手动验证凭据
+    permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        admin_username = (request.data.get('admin_username') or '').strip()
-        admin_password = request.data.get('admin_password', '')
-        target_user_id = request.data.get('target_user_id')  # 可选，如果提供则直接切换
+        target_username = (request.data.get('target_username') or '').strip()
+        target_password = request.data.get('target_password', '')
         
-        if not admin_username or not admin_password:
-            raise ValidationError({'code': 'missing_credentials', 'detail': '请输入管理员用户名和密码'})
+        if not target_username or not target_password:
+            raise ValidationError({'code': 'missing_credentials', 'detail': '请输入目标管理员的用户名和密码'})
 
-        # 验证管理员凭据
+        # 验证目标管理员凭据
         from django.contrib.auth import authenticate
-        admin_user = authenticate(username=admin_username, password=admin_password)
+        target_user = authenticate(username=target_username, password=target_password)
         
-        if not admin_user or not getattr(admin_user, 'is_staff', False):
+        if not target_user or not getattr(target_user, 'is_staff', False):
             raise PermissionDenied('管理员凭据无效')
         
-        # 检查管理员角色权限（至少需要管理员级别才能切换其他管理员账号）
-        admin_role = getattr(admin_user, 'admin_role', 'none')
-        if admin_role not in ['admin', 'super_admin']:
-            raise PermissionDenied('权限不足，需要管理员或超级管理员权限')
+        # 检查目标用户是否是管理员角色
+        target_role = getattr(target_user, 'admin_role', 'none')
+        if target_role not in ['reviewer', 'moderator', 'admin', 'super_admin']:
+            raise PermissionDenied('目标用户不是管理员')
 
-        # 如果提供了目标用户ID，直接执行切换
-        if target_user_id:
-            target_user = get_object_or_404(User, pk=target_user_id)
-            # 确保目标是管理员
-            if not getattr(target_user, 'is_staff', False):
-                raise PermissionDenied('目标用户不是管理员')
-            from rest_framework_simplejwt.tokens import RefreshToken
-            refresh = RefreshToken.for_user(target_user)
-            return Response({
-                'access': str(refresh.access_token),
-                'refresh': str(refresh),
-                'user': {
-                    'id': str(target_user.id),
-                    'username': target_user.username,
-                    'nickname': target_user.nickname,
-                    'is_staff': target_user.is_staff,
-                    'is_superuser': target_user.is_superuser,
-                    'admin_role': getattr(target_user, 'admin_role', 'none'),
-                },
-                'switched': True,
-                'by_admin': admin_user.username,
-            })
-
-        # 返回可切换的管理员账号列表
-        # 超级管理员可以切换到任何管理员，其他管理员只能切换到非超级管理员
-        if admin_role == 'super_admin':
-            # 超级管理员可以看到所有管理员（除了自己）
-            switchable_users = User.objects.filter(
-                is_staff=True,
-                admin_role__in=['reviewer', 'moderator', 'admin', 'super_admin']
-            ).exclude(id=admin_user.id).order_by('admin_role', 'username')
-        else:
-            # 普通管理员只能切换到审核员、版主、管理员（不能切换到超级管理员，也不能切换到自己）
-            switchable_users = User.objects.filter(
-                is_staff=True,
-                admin_role__in=['reviewer', 'moderator', 'admin']
-            ).exclude(id=admin_user.id).order_by('admin_role', 'username')
-        
-        users_data = []
-        for u in switchable_users[:100]:  # 限制返回数量
-            users_data.append({
-                'id': str(u.id),
-                'username': u.username,
-                'nickname': u.nickname,
-                'is_staff': u.is_staff,
-                'admin_role': u.admin_role or 'none',
-            })
+        # 生成目标用户的 token
+        from rest_framework_simplejwt.tokens import RefreshToken
+        refresh = RefreshToken.for_user(target_user)
         
         return Response({
-            'verified': True,
-            'admin': {
-                'id': str(admin_user.id),
-                'username': admin_user.username,
-                'admin_role': admin_role,
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': {
+                'id': str(target_user.id),
+                'username': target_user.username,
+                'nickname': target_user.nickname,
+                'is_staff': target_user.is_staff,
+                'is_superuser': target_user.is_superuser,
+                'admin_role': target_role,
             },
-            'users': users_data,
-            'count': len(users_data),
+            'switched': True,
         })
 
 
