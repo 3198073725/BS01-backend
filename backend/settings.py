@@ -415,6 +415,21 @@ CELERY_TASK_ROUTES = {
     'tasks.transcode_video_to_hls': {'queue': 'transcode', 'routing_key': 'transcode.hls'},
 }
 
+# Celery Beat 定时任务调度配置
+# 需要启动 celery-beat 服务: celery -A backend beat -l INFO
+CELERY_BEAT_SCHEDULE = {
+    # 每天凌晨3点清理超过24小时的废弃上传会话
+    'cleanup-expired-upload-sessions': {
+        'task': 'tasks.cleanup_expired_upload_sessions',
+        'schedule': timedelta(hours=24),  # 每24小时执行一次
+        'args': (24,),  # 清理超过24小时的会话
+        'kwargs': {},
+    },
+}
+
+# 限制转码队列的并发 worker 数量（通过 worker 启动参数控制更优，这里提供配置参考）
+# 实际上，我们需要在 install_systemd.sh 中调整 celery worker 的启动命令
+
 # 生产环境默认更安全：如果没有通过环境变量显式配置且代码侧也未配置允许来源，则禁用 CORS。
 # 但如果代码侧已配置了允许来源（例如用于内部验证/联调），不要在这里强制清空。
 if (not DEBUG) and (not os.getenv('CORS_ALLOWED_ORIGINS')) and (not CORS_ALLOWED_ORIGINS):

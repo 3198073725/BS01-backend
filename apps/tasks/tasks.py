@@ -306,3 +306,67 @@ def transcode_video_to_hls(self, video_id: str) -> dict:
         except Exception:
             pass
         return {'ok': False, 'error': error}
+
+
+@shared_task(name='tasks.cleanup_expired_upload_sessions')
+def cleanup_expired_upload_sessions(hours: int = 24) -> dict:
+    """
+    清理超过指定时间的废弃上传会话（分片上传临时文件）。
+    建议通过 Celery Beat 定时调度执行。
+    """
+    import os
+    import shutil
+    from datetime import timedelta
+    from django.conf import settings
+    from django.utils import timezone
+
+    sessions_base = os.path.join(settings.MEDIA_ROOT, 'uploads', 'sessions')
+    if not os.path.exists(sessions_base):
+        return {'ok': True, 'cleaned': 0, 'freed_bytes': 0, 'reason': 'sessions_dir_not_exists'}
+
+    cutoff_time = timezone.now() - timedelta(hours=hours)
+    total_cleaned = 0
+    total_size = 0
+    errors = []
+
+    for session_id in os.listdir(sessions_base):
+        session_path = os.path.join(sessions_base, session_id)
+        if not os.path.isdir(session_path):
+            continue
+
+        meta_path = os.path.join(session_path, 'meta.json')
+        try:
+            if os.path.exists(meta_path):
+                mtime = os.path.getmtime(meta_path)
+                modified_at = timezone.datetime.fromtimestamp(mtime, tz=timezone.utc)
+                if modified_at > cutoff_time:
+                    continue
+
+            # 计算目录大小
+            size = 0
+            for dirpath, dirnames, filenames in os.walk(session_path):
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    try:
+                        size += os.path.getsize(fp)
+                    except OSError:
+                        pass
+
+            try:
+                shutil.rmtree(session_path)
+            except Exception as e:
+                errors.append(f'{session_id}: {str(e)}')
+                continue
+
+            total_cleaned += 1
+            total_size += size
+
+        except Exception as e:
+            errors.append(f'{session_id}: {str(e)}')
+
+    return {
+        'ok': True,
+        'cleaned': total_cleaned,
+        'freed_bytes': total_size,
+        'errors_count': len(errors)
+    }

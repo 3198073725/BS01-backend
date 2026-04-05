@@ -685,8 +685,24 @@ class AdminVideosBulkDeleteView(APIView):
         if len(ids) > 500:
             raise ValidationError({'video_ids': '一次最多处理 500 个'})
         qs = Video.objects.filter(id__in=ids)
+        
+        # 统计各作者被删除的视频数，用于更新 user.video_count
+        user_counts = qs.values('user_id').annotate(count=Count('id'))
         affected = qs.count()
-        qs.delete()
+        
+        with transaction.atomic():
+            # 批量删除
+            qs.delete()
+            # 补偿更新用户的视频计数
+            for item in user_counts:
+                User.objects.filter(id=item['user_id']).update(
+                    video_count=Case(
+                        When(video_count__gte=item['count'], then=F('video_count') - item['count']),
+                        default=0,
+                        output_field=IntegerField()
+                    )
+                )
+        
         try:
             _audit(request, 'video.bulk_delete', 'video', None, {'count': len(ids), 'affected': affected})
         except Exception:
@@ -892,7 +908,7 @@ class AdminMeView(APIView):
 
 
 class AdminUserForceLogoutView(APIView):
-    permission_classes = [IsReviewer]
+    permission_classes = [IsAdmin]
 
     def post(self, request, pk):
         cutoff = int(time.time())

@@ -887,8 +887,25 @@ class VideoBulkDeleteView(APIView):
         qs = Video.objects.filter(user=request.user, id__in=ids)
         if not getattr(request.user, 'is_staff', False):
             qs = qs.exclude(status='banned')
-        removed, _ = qs.delete()
-        return Response({'removed': int(removed)})
+        
+        # 统计各作者被删除的视频数，用于更新 user.video_count
+        user_counts = qs.values('user_id').annotate(count=Count('id'))
+        affected = qs.count()
+        
+        with transaction.atomic():
+            # 批量删除
+            qs.delete()
+            # 补偿更新用户的视频计数
+            for item in user_counts:
+                User.objects.filter(id=item['user_id']).update(
+                    video_count=Case(
+                        When(video_count__gte=item['count'], then=F('video_count') - item['count']),
+                        default=0,
+                        output_field=IntegerField()
+                    )
+                )
+        
+        return Response({'removed': int(affected)})
 
 
 class VideoThumbnailPickView(APIView):
