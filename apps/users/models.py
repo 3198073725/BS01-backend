@@ -52,6 +52,14 @@ class User(AbstractBaseUser, PermissionsMixin):
         ('friends_only', '仅好友可见')
     ]
     
+    ADMIN_ROLE_CHOICES = [
+        ('none', '无权限'),
+        ('reviewer', '审核员'),  # 可查看、记录警告
+        ('moderator', '版主'),   # 可删除内容
+        ('admin', '管理员'),     # 可封禁用户
+        ('super_admin', '超级管理员'),  # 全部权限
+    ]
+    
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     username = models.CharField(
         max_length=150, 
@@ -84,6 +92,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_verified = models.BooleanField(default=False, verbose_name="是否认证用户")
     is_creator = models.BooleanField(default=False, verbose_name="是否创作者")
     privacy_mode = models.CharField(max_length=20, choices=PRIVACY_CHOICES, default='public', verbose_name="隐私模式")
+    admin_role = models.CharField(max_length=20, choices=ADMIN_ROLE_CHOICES, default='none', verbose_name="管理员角色")
     
     # 统计字段（缓存）
     followers_count = models.PositiveIntegerField(default=0, verbose_name="粉丝数")

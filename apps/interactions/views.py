@@ -1041,3 +1041,82 @@ class NotificationsClearAllView(APIView):
         qs = Notification.objects.filter(user=request.user, hidden=False)
         updated = qs.update(hidden=True, read=True)
         return Response({'updated': int(updated)})
+
+
+from apps.content.models import Report
+
+
+class ReportCreateView(APIView):
+    """举报提交接口
+
+    - 方法：POST /api/interactions/reports/
+    - 参数：target_type（video/comment/user）、target_id、reason_code、description（可选）
+    - 权限：需登录
+    - 节流：report
+    - 结果：创建举报记录，返回 201
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_scope = 'report'
+
+    def post(self, request):
+        target_type = (request.data.get('target_type') or '').strip().lower()
+        target_id = request.data.get('target_id')
+        reason_code = (request.data.get('reason_code') or '').strip()
+        description = (request.data.get('description') or '').strip()
+
+        # 验证必填字段
+        if not target_type:
+            raise ValidationError({'target_type': '必填，可选值: video, comment, user'})
+        if target_type not in ('video', 'comment', 'user'):
+            raise ValidationError({'target_type': '非法值，可选: video, comment, user'})
+        if not target_id:
+            raise ValidationError({'target_id': '必填'})
+
+        # 验证目标对象存在
+        if target_type == 'video':
+            from apps.videos.models import Video
+            target = get_object_or_404(Video, pk=target_id)
+            # 不能举报自己的视频
+            if str(target.user_id) == str(request.user.id):
+                raise PermissionDenied('不能举报自己的内容')
+        elif target_type == 'comment':
+            target = get_object_or_404(Comment, pk=target_id)
+            # 不能举报自己的评论
+            if str(target.user_id) == str(request.user.id):
+                raise PermissionDenied('不能举报自己的内容')
+        elif target_type == 'user':
+            from apps.users.models import User
+            target = get_object_or_404(User, pk=target_id)
+            # 不能举报自己
+            if str(target.id) == str(request.user.id):
+                raise PermissionDenied('不能举报自己')
+
+        # 检查是否已举报过同一目标
+        existing = Report.objects.filter(
+            reporter=request.user,
+            target_type=target_type,
+            target_id=target_id,
+            status='pending'
+        ).first()
+        if existing:
+            return Response({
+                'report_id': str(existing.id),
+                'status': existing.status,
+                'message': '您已举报过该内容，正在等待处理'
+            }, status=status.HTTP_200_OK)
+
+        # 创建举报记录
+        report = Report.objects.create(
+            reporter=request.user,
+            target_type=target_type,
+            target_id=target_id,
+            reason_code=reason_code or 'other',
+            description=description or None,
+            status='pending'
+        )
+
+        return Response({
+            'report_id': str(report.id),
+            'status': report.status,
+            'created_at': report.created_at
+        }, status=status.HTTP_201_CREATED)

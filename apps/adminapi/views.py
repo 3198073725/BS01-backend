@@ -21,6 +21,7 @@ from apps.videos.models import Video, VideoTag
 from apps.interactions.models import Comment, History, Like
 from apps.content.models import AuditLog, Category, Tag
 from apps.notifications.models import SystemAnnouncement
+from .permissions import IsReviewer, IsModerator, IsAdmin, IsSuperAdmin, CanHandleReport
 
 
 def _parse_bool(v) -> bool | None:
@@ -56,7 +57,7 @@ from apps.users.serializers import UserMeSerializer, UserFollowListSerializer
     get=extend_schema(responses={200: UserFollowListSerializer(many=True)}),
 )
 class AdminUsersListView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request):
         qs = User.objects.all()
@@ -67,6 +68,10 @@ class AdminUsersListView(APIView):
             v = _parse_bool(request.query_params.get(field))
             if v is not None:
                 qs = qs.filter(**{field: v})
+        # admin_role filter
+        admin_role = (request.query_params.get('admin_role') or '').strip()
+        if admin_role:
+            qs = qs.filter(admin_role=admin_role)
         order = (request.query_params.get('order') or '').strip().lower()
         if order == 'oldest':
             qs = qs.order_by('date_joined')
@@ -95,6 +100,7 @@ class AdminUsersListView(APIView):
                 'is_verified': bool(u.is_verified),
                 'is_creator': bool(u.is_creator),
                 'is_staff': bool(u.is_staff),
+                'admin_role': u.admin_role or 'none',
                 'followers_count': u.followers_count,
                 'following_count': u.following_count,
                 'video_count': getattr(u, 'video_count_calc', u.video_count),
@@ -108,7 +114,7 @@ class AdminUsersListView(APIView):
     get=extend_schema(responses={200: UserMeSerializer}),
 )
 class AdminUserDetailView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request, pk):
         u = get_object_or_404(User, pk=pk)
@@ -121,6 +127,7 @@ class AdminUserDetailView(APIView):
             'is_verified': bool(u.is_verified),
             'is_creator': bool(u.is_creator),
             'is_staff': bool(u.is_staff),
+            'admin_role': u.admin_role or 'none',
             'followers_count': u.followers_count,
             'following_count': u.following_count,
             'video_count': u.video_count,
@@ -162,6 +169,15 @@ class AdminUserDetailView(APIView):
             if vv is None:
                 raise ValidationError({'is_staff': '必须为布尔值'})
             updates['is_staff'] = bool(vv)
+        if 'admin_role' in body:
+            # 仅超级管理员可调整 admin_role
+            if not getattr(request.user, 'is_superuser', False):
+                raise PermissionDenied('仅超级管理员可修改管理员角色')
+            role = str(body.get('admin_role') or '').strip()
+            valid_roles = ['none', 'reviewer', 'moderator', 'admin', 'super_admin']
+            if role not in valid_roles:
+                raise ValidationError({'admin_role': f'非法值，可选: {", ".join(valid_roles)}'})
+            updates['admin_role'] = role
 
         if not updates:
             return Response({'updated': 0})
@@ -179,7 +195,7 @@ class AdminUserDetailView(APIView):
 
 
 class AdminVideosListView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request):
         qs = Video.objects.all().select_related('user', 'category').prefetch_related('video_tags__tag')
@@ -283,7 +299,7 @@ class AdminVideosListView(APIView):
 
 
 class AdminVideoDetailView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request, pk):
         v = get_object_or_404(Video, pk=pk)
@@ -431,7 +447,7 @@ class AdminVideoDetailView(APIView):
 
 
 class AdminAnalyticsOverviewView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request):
         rng = (request.query_params.get('range') or '7d').lower().strip()
@@ -580,7 +596,7 @@ class AdminAnalyticsOverviewView(APIView):
 
 
 class AdminVideosBulkUpdateView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def post(self, request):
         ids = request.data.get('video_ids') or request.data.get('ids')
@@ -659,7 +675,7 @@ class AdminVideosBulkUpdateView(APIView):
 
 
 class AdminVideosBulkDeleteView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def post(self, request):
         ids = request.data.get('video_ids') or request.data.get('ids')
@@ -679,7 +695,7 @@ class AdminVideosBulkDeleteView(APIView):
 
 
 class AdminVideosBatchApproveView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def post(self, request):
         ids = request.data.get('video_ids') or request.data.get('ids')
@@ -711,7 +727,7 @@ class AdminVideosBatchApproveView(APIView):
 
 
 class AdminVideosTranscodeFailuresView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request):
         qs = Video.objects.filter(transcode_error__isnull=False).order_by('-updated_at')
@@ -732,7 +748,7 @@ class AdminVideosTranscodeFailuresView(APIView):
 
 
 class AdminVideosMetricsTrendView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request):
         metric = (request.query_params.get('metric') or 'upload').strip().lower()
@@ -765,7 +781,7 @@ class AdminVideosMetricsTrendView(APIView):
 
 
 class AdminCommentsListView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request):
         qs = Comment.objects.select_related('user', 'video').all()
@@ -848,7 +864,7 @@ class AdminCommentsListView(APIView):
 
 
 class AdminCommentDetailView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def delete(self, request, pk):
         c = get_object_or_404(Comment, pk=pk)
@@ -862,7 +878,7 @@ class AdminCommentDetailView(APIView):
 
 
 class AdminMeView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request):
         u = request.user
@@ -871,11 +887,12 @@ class AdminMeView(APIView):
             'username': getattr(u, 'username', ''),
             'is_staff': bool(getattr(u, 'is_staff', False)),
             'is_superuser': bool(getattr(u, 'is_superuser', False)),
+            'admin_role': getattr(u, 'admin_role', 'none'),
         })
 
 
 class AdminUserForceLogoutView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def post(self, request, pk):
         cutoff = int(time.time())
@@ -891,7 +908,7 @@ class AdminUserForceLogoutView(APIView):
 
 
 class AdminAuditLogsListView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request):
         qs = AuditLog.objects.select_related('actor').all()
@@ -931,7 +948,7 @@ class AdminAuditLogsListView(APIView):
 
 
 class AdminCategoriesListView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request):
         qs = Category.objects.all()
@@ -963,7 +980,7 @@ class AdminCategoriesListView(APIView):
 
 
 class AdminCategoryDetailView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def patch(self, request, pk):
         c = get_object_or_404(Category, pk=pk)
@@ -1004,7 +1021,7 @@ class AdminCategoryDetailView(APIView):
 
 
 class AdminTagsListView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request):
         qs = Tag.objects.all().annotate(usage_count=Count('tag_videos__id', distinct=True))
@@ -1035,7 +1052,7 @@ class AdminTagsListView(APIView):
 
 
 class AdminTagDetailView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def patch(self, request, pk):
         t = get_object_or_404(Tag, pk=pk)
@@ -1070,7 +1087,7 @@ class AdminTagDetailView(APIView):
 
 
 class AdminTagsBulkDeleteView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def post(self, request):
         ids = request.data.get('ids') or []
@@ -1098,7 +1115,7 @@ class AdminTagsBulkDeleteView(APIView):
 
 
 class AdminTagsMergeView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     @transaction.atomic
     def post(self, request):
@@ -1134,7 +1151,7 @@ class AdminTagsMergeView(APIView):
 
 
 class AdminAnnouncementsListCreateView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request):
         p = StandardResultsSetPagination()
@@ -1194,7 +1211,7 @@ class AdminAnnouncementsListCreateView(APIView):
 
 
 class AdminAnnouncementDetailView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsReviewer]
 
     def get(self, request, pk):
         a = get_object_or_404(SystemAnnouncement, pk=pk)
@@ -1259,3 +1276,441 @@ class AdminAnnouncementDetailView(APIView):
         except Exception:
             pass
         return Response({'deleted': 1})
+
+
+from apps.content.models import Report, ModerationAction
+
+
+class AdminReportsListView(APIView):
+    """举报列表接口（管理端）
+
+    - 方法：GET /api/admin/reports/
+    - 权限：审核员及以上
+    - 支持过滤：status、target_type、reporter_id
+    - 支持排序：created_at（默认倒序）
+    """
+    permission_classes = [IsReviewer]
+
+    def get(self, request):
+        qs = Report.objects.all().select_related('reporter', 'handled_by')
+
+        # 过滤条件
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        target_type = request.query_params.get('target_type')
+        if target_type:
+            qs = qs.filter(target_type=target_type)
+
+        reporter_id = request.query_params.get('reporter_id')
+        if reporter_id:
+            qs = qs.filter(reporter_id=reporter_id)
+
+        target_id = request.query_params.get('target_id')
+        if target_id:
+            qs = qs.filter(target_id=target_id)
+
+        # 排序
+        order = (request.query_params.get('order') or '').strip().lower()
+        if order == 'oldest':
+            qs = qs.order_by('created_at')
+        else:
+            qs = qs.order_by('-created_at')
+
+        p = StandardResultsSetPagination()
+        rows = list(p.paginate_queryset(qs, request, view=self))
+        total = p.page.paginator.count
+
+        data = []
+        for r in rows:
+            reporter = r.reporter
+            handled_by = r.handled_by
+
+            # 获取目标对象信息
+            target_info = None
+            try:
+                if r.target_type == 'video':
+                    from apps.videos.models import Video
+                    v = Video.objects.filter(id=r.target_id).first()
+                    if v:
+                        target_info = {
+                            'id': str(v.id),
+                            'title': v.title,
+                            'author': v.user.username if v.user else None,
+                        }
+                elif r.target_type == 'comment':
+                    from apps.interactions.models import Comment
+                    c = Comment.objects.filter(id=r.target_id).select_related('user', 'video').first()
+                    if c:
+                        target_info = {
+                            'id': str(c.id),
+                            'content': c.content[:100] if c.content else '',
+                            'author': c.user.username if c.user else None,
+                            'video_title': c.video.title if c.video else None,
+                        }
+                elif r.target_type == 'user':
+                    from apps.users.models import User
+                    u = User.objects.filter(id=r.target_id).first()
+                    if u:
+                        target_info = {
+                            'id': str(u.id),
+                            'username': u.username,
+                            'nickname': u.nickname,
+                        }
+            except Exception:
+                pass
+
+            data.append({
+                'id': str(r.id),
+                'reporter': {
+                    'id': str(reporter.id) if reporter else None,
+                    'username': reporter.username if reporter else None,
+                    'nickname': reporter.nickname if reporter else None,
+                },
+                'target_type': r.target_type,
+                'target_id': str(r.target_id),
+                'target_info': target_info,
+                'reason_code': r.reason_code,
+                'description': r.description,
+                'status': r.status,
+                'handled_by': {
+                    'id': str(handled_by.id) if handled_by else None,
+                    'username': handled_by.username if handled_by else None,
+                } if handled_by else None,
+                'handled_at': r.handled_at,
+                'moderator_notes': r.moderator_notes,
+                'created_at': r.created_at,
+                'updated_at': r.updated_at,
+            })
+
+        return Response(p.format(data, total))
+
+
+class AdminReportDetailView(APIView):
+    """举报详情接口（管理端）
+
+    - 方法：GET /api/admin/reports/<pk>/
+    - 权限：审核员及以上
+    """
+    permission_classes = [IsReviewer]
+
+    def get(self, request, pk):
+        report = get_object_or_404(Report.objects.select_related('reporter', 'handled_by'), pk=pk)
+
+        # 获取目标对象详情
+        target_detail = None
+        try:
+            if report.target_type == 'video':
+                from apps.videos.models import Video
+                v = Video.objects.filter(id=report.target_id).select_related('user').first()
+                if v:
+                    target_detail = {
+                        'id': str(v.id),
+                        'title': v.title,
+                        'description': v.description,
+                        'author': {
+                            'id': str(v.user.id) if v.user else None,
+                            'username': v.user.username if v.user else None,
+                            'nickname': v.user.nickname if v.user else None,
+                        },
+                        'status': v.status,
+                        'visibility': v.visibility,
+                        'created_at': v.created_at,
+                    }
+            elif report.target_type == 'comment':
+                from apps.interactions.models import Comment
+                c = Comment.objects.filter(id=report.target_id).select_related('user', 'video').first()
+                if c:
+                    target_detail = {
+                        'id': str(c.id),
+                        'content': c.content,
+                        'author': {
+                            'id': str(c.user.id) if c.user else None,
+                            'username': c.user.username if c.user else None,
+                            'nickname': c.user.nickname if c.user else None,
+                        },
+                        'video': {
+                            'id': str(c.video.id) if c.video else None,
+                            'title': c.video.title if c.video else None,
+                        },
+                        'created_at': c.created_at,
+                    }
+            elif report.target_type == 'user':
+                from apps.users.models import User
+                u = User.objects.filter(id=report.target_id).first()
+                if u:
+                    target_detail = {
+                        'id': str(u.id),
+                        'username': u.username,
+                        'nickname': u.nickname,
+                        'email': u.email,
+                        'is_active': u.is_active,
+                        'is_verified': u.is_verified,
+                        'date_joined': u.date_joined,
+                    }
+        except Exception:
+            pass
+
+        # 获取处理记录
+        actions = []
+        for a in report.actions.select_related('moderator').order_by('-created_at'):
+            actions.append({
+                'id': str(a.id),
+                'action': a.action,
+                'reason': a.reason,
+                'moderator': {
+                    'id': str(a.moderator.id) if a.moderator else None,
+                    'username': a.moderator.username if a.moderator else None,
+                },
+                'created_at': a.created_at,
+            })
+
+        data = {
+            'id': str(report.id),
+            'reporter': {
+                'id': str(report.reporter.id) if report.reporter else None,
+                'username': report.reporter.username if report.reporter else None,
+                'nickname': report.reporter.nickname if report.reporter else None,
+            },
+            'target_type': report.target_type,
+            'target_id': str(report.target_id),
+            'target_detail': target_detail,
+            'reason_code': report.reason_code,
+            'description': report.description,
+            'status': report.status,
+            'handled_by': {
+                'id': str(report.handled_by.id) if report.handled_by else None,
+                'username': report.handled_by.username if report.handled_by else None,
+            } if report.handled_by else None,
+            'handled_at': report.handled_at,
+            'moderator_notes': report.moderator_notes,
+            'created_at': report.created_at,
+            'updated_at': report.updated_at,
+            'actions': actions,
+        }
+        return Response(data)
+
+
+class AdminReportHandleView(APIView):
+    """举报处理接口（管理端）
+
+    - 方法：POST /api/admin/reports/<pk>/handle/
+    - 权限：根据动作类型动态判断
+    - 参数：action（动作类型）、notes（备注）
+    """
+    permission_classes = [CanHandleReport]
+
+    def post(self, request, pk):
+        report = get_object_or_404(Report, pk=pk)
+
+        action = (request.data.get('action') or '').strip()
+        notes = (request.data.get('notes') or '').strip()
+
+        if not action:
+            raise ValidationError({'action': '必填，例如: dismiss, warn, delete_content, ban_user'})
+
+        valid_actions = ['dismiss', 'warn', 'delete_content', 'ban_user', 'ban_temp', 'escalate']
+        if action not in valid_actions:
+            raise ValidationError({'action': f'非法值，可选: {", ".join(valid_actions)}'})
+
+        with transaction.atomic():
+            # 更新举报状态
+            report.status = 'resolved' if action != 'escalate' else 'escalated'
+            report.handled_by = request.user
+            report.handled_at = timezone.now()
+            report.moderator_notes = notes or report.moderator_notes
+            report.save(update_fields=['status', 'handled_by', 'handled_at', 'moderator_notes', 'updated_at'])
+
+            # 记录处理动作
+            ModerationAction.objects.create(
+                report=report,
+                moderator=request.user,
+                action=action,
+                reason=notes,
+            )
+
+            # 执行具体动作
+            action_result = None
+            try:
+                if action == 'delete_content':
+                    if report.target_type == 'video':
+                        from apps.videos.models import Video
+                        v = Video.objects.filter(id=report.target_id).first()
+                        if v:
+                            v.delete()
+                            action_result = '视频已删除'
+                    elif report.target_type == 'comment':
+                        from apps.interactions.models import Comment
+                        c = Comment.objects.filter(id=report.target_id).first()
+                        if c:
+                            c.delete()
+                            action_result = '评论已删除'
+                elif action == 'ban_user' and report.target_type == 'user':
+                    from apps.users.models import User
+                    u = User.objects.filter(id=report.target_id).first()
+                    if u:
+                        u.is_active = False
+                        u.save(update_fields=['is_active'])
+                        action_result = '用户已封禁'
+                elif action == 'ban_temp' and report.target_type == 'user':
+                    action_result = '用户暂时封禁（需在用户系统实现）'
+                elif action == 'warn':
+                    action_result = '已记录警告'
+                elif action == 'dismiss':
+                    action_result = '举报已驳回'
+                elif action == 'escalate':
+                    action_result = '举报已升级'
+            except Exception as e:
+                action_result = f'执行动作时出错: {str(e)}'
+
+        _audit(request, 'report.handle', 'report', str(report.id), {
+            'action': action,
+            'notes': notes,
+            'result': action_result,
+        })
+
+        # 发送站内通知给被处理用户
+        try:
+            from apps.interactions.models import Notification
+            target_user_id = None
+            video_id = None
+            comment_id = None
+
+            # 获取目标对象作者
+            if report.target_type == 'video':
+                from apps.videos.models import Video
+                v = Video.objects.filter(id=report.target_id).first()
+                if v:
+                    target_user_id = v.user_id
+                    video_id = v.id
+            elif report.target_type == 'comment':
+                from apps.interactions.models import Comment
+                c = Comment.objects.filter(id=report.target_id).first()
+                if c:
+                    target_user_id = c.user_id
+                    video_id = c.video_id
+                    comment_id = c.id
+            elif report.target_type == 'user':
+                target_user_id = report.target_id
+
+            # 发送通知
+            if target_user_id:
+                verb_map = {
+                    'dismiss': 'report_dismissed',
+                    'warn': 'report_warned',
+                    'delete_content': 'content_removed',
+                    'ban_user': 'account_banned',
+                    'ban_temp': 'account_suspended',
+                    'escalate': 'report_escalated',
+                }
+                verb = verb_map.get(action, 'report_handled')
+                Notification.objects.create(
+                    user_id=target_user_id,
+                    actor=request.user,
+                    verb=verb,
+                    video_id=video_id,
+                    comment_id=comment_id
+                )
+        except Exception:
+            pass  # 通知失败不影响主流程
+
+        return Response({
+            'report_id': str(report.id),
+            'status': report.status,
+            'action': action,
+            'action_result': action_result,
+            'handled_at': report.handled_at,
+        })
+
+
+class AdminSwitchUserView(APIView):
+    """切换用户（管理员模拟登录）
+
+    - 方法：POST /api/admin/switch-user/
+    - 权限：需验证管理员凭据
+    - 参数：admin_username, admin_password
+    - 返回：可切换的用户列表（版主及以上权限）
+    """
+    permission_classes = [permissions.AllowAny]  # 手动验证凭据
+
+    def post(self, request):
+        admin_username = (request.data.get('admin_username') or '').strip()
+        admin_password = request.data.get('admin_password', '')
+        target_user_id = request.data.get('target_user_id')  # 可选，如果提供则直接切换
+        
+        if not admin_username or not admin_password:
+            raise ValidationError({'detail': '请输入管理员用户名和密码'})
+
+        # 验证管理员凭据
+        from django.contrib.auth import authenticate
+        admin_user = authenticate(username=admin_username, password=admin_password)
+        
+        if not admin_user or not getattr(admin_user, 'is_staff', False):
+            raise PermissionDenied('管理员凭据无效')
+        
+        # 检查管理员角色权限（至少需要版主级别才能切换用户）
+        admin_role = getattr(admin_user, 'admin_role', 'none')
+        if admin_role not in ['moderator', 'admin', 'super_admin']:
+            raise PermissionDenied('权限不足，需要版主及以上权限')
+
+        # 如果提供了目标用户ID，直接执行切换
+        if target_user_id:
+            target_user = get_object_or_404(User, pk=target_user_id)
+            from rest_framework_simplejwt.tokens import RefreshToken
+            refresh = RefreshToken.for_user(target_user)
+            return Response({
+                'access': str(refresh.access_token),
+                'refresh': str(refresh),
+                'user': {
+                    'id': str(target_user.id),
+                    'username': target_user.username,
+                    'nickname': target_user.nickname,
+                    'is_staff': target_user.is_staff,
+                    'is_superuser': target_user.is_superuser,
+                },
+                'switched': True,
+                'by_admin': admin_user.username,
+            })
+
+        # 否则返回可切换的用户列表
+        # 超级管理员可以切换到任何用户，其他管理员只能切换到普通用户
+        if admin_role == 'super_admin':
+            switchable_users = User.objects.all().order_by('username')
+        else:
+            # 非超级管理员只能切换到非管理员用户
+            switchable_users = User.objects.filter(is_staff=False).order_by('username')
+        
+        users_data = []
+        for u in switchable_users[:100]:  # 限制返回数量
+            users_data.append({
+                'id': str(u.id),
+                'username': u.username,
+                'nickname': u.nickname,
+                'is_staff': u.is_staff,
+                'admin_role': u.admin_role or 'none',
+            })
+        
+        return Response({
+            'verified': True,
+            'admin': {
+                'id': str(admin_user.id),
+                'username': admin_user.username,
+                'admin_role': admin_role,
+            },
+            'users': users_data,
+            'count': len(users_data),
+        })
+
+
+class AdminImpersonateExitView(APIView):
+    """退出模拟登录，返回原始管理员token
+
+    - 方法：POST /api/admin/impersonate-exit/
+    - 权限：需登录
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        # 前端保存原始管理员token，退出时恢复
+        return Response({'ok': True})

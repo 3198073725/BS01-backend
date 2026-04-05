@@ -283,7 +283,16 @@ def transcode_video_to_hls(self, video_id: str) -> dict:
         try:
             v.low_mp4 = low_rel if low_rel else None
             v.transcode_error = None
-            v.save(update_fields=['low_mp4', 'transcode_error', 'updated_at'])
+            # 转码完成后不自动发布，但应退出 processing 状态，避免前端一直提示“处理中”
+            # 这里将 processing -> draft（仍需管理员审核后再发布）
+            fields = ['low_mp4', 'transcode_error', 'updated_at']
+            try:
+                if getattr(v, 'status', None) == 'processing':
+                    v.status = 'draft'
+                    fields.append('status')
+            except Exception:
+                pass
+            v.save(update_fields=fields)
         except Exception:
             pass
         # Do NOT auto-publish here. Keep status as-is (e.g., 'processing').

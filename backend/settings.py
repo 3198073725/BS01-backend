@@ -167,9 +167,9 @@ REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
     'DEFAULT_THROTTLE_CLASSES': [
-        'rest_framework.throttling.ScopedRateThrottle',
-        'rest_framework.throttling.AnonRateThrottle',
-        'rest_framework.throttling.UserRateThrottle',
+        'apps.configs.throttling.DynamicScopedRateThrottle',
+        'apps.configs.throttling.DynamicAnonRateThrottle',
+        'apps.configs.throttling.DynamicUserRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
         'register': os.getenv('THROTTLE_REGISTER', '5/hour'),
@@ -198,6 +198,7 @@ REST_FRAMEWORK = {
         'contact_submit': os.getenv('THROTTLE_CONTACT_SUBMIT', '30/hour'),
         'anon': os.getenv('THROTTLE_ANON', '100/hour'),
         'user': os.getenv('THROTTLE_USER', '1000/hour'),
+        'report': os.getenv('THROTTLE_REPORT', '10/hour'),
     },
     # 统一异常处理（错误返回结构统一）
     'EXCEPTION_HANDLER': 'backend.api_exceptions.custom_exception_handler',
@@ -414,7 +415,9 @@ CELERY_TASK_ROUTES = {
     'tasks.transcode_video_to_hls': {'queue': 'transcode', 'routing_key': 'transcode.hls'},
 }
 
-if (not DEBUG) and (not os.getenv('CORS_ALLOWED_ORIGINS')):
+# 生产环境默认更安全：如果没有通过环境变量显式配置且代码侧也未配置允许来源，则禁用 CORS。
+# 但如果代码侧已配置了允许来源（例如用于内部验证/联调），不要在这里强制清空。
+if (not DEBUG) and (not os.getenv('CORS_ALLOWED_ORIGINS')) and (not CORS_ALLOWED_ORIGINS):
     CORS_ALLOWED_ORIGINS = []
     CORS_ALLOW_CREDENTIALS = False
 

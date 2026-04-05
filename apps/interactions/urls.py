@@ -42,4 +42,6 @@ urlpatterns = [
     path('notifications/mark-all-read/', views.NotificationsMarkAllReadView.as_view(), name='notifications-mark-all-read'),
     path('notifications/clear/', views.NotificationsClearAllView.as_view(), name='notifications-clear'),
     path('notifications/unread-count/', views.NotificationsUnreadCountView.as_view(), name='notifications-unread-count'),
+    # 举报
+    path('reports/', views.ReportCreateView.as_view(), name='report-create'),
 ]

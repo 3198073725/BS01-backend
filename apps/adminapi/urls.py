@@ -40,4 +40,13 @@ urlpatterns = [
     # System announcements
     path('announcements/', views.AdminAnnouncementsListCreateView.as_view(), name='announcements-list-create'),
     path('announcements/<uuid:pk>/', views.AdminAnnouncementDetailView.as_view(), name='announcements-detail'),
+
+    # Reports (举报管理)
+    path('reports/', views.AdminReportsListView.as_view(), name='reports-list'),
+    path('reports/<uuid:pk>/', views.AdminReportDetailView.as_view(), name='reports-detail'),
+    path('reports/<uuid:pk>/handle/', views.AdminReportHandleView.as_view(), name='reports-handle'),
+
+    # Switch User (切换用户)
+    path('switch-user/', views.AdminSwitchUserView.as_view(), name='switch-user'),
+    path('impersonate-exit/', views.AdminImpersonateExitView.as_view(), name='impersonate-exit'),
 ]

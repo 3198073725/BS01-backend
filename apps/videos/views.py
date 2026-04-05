@@ -557,7 +557,10 @@ class VideoDetailView(APIView):
         def url_of(rel: str) -> str:
             if media.startswith('http://') or media.startswith('https://'):
                 return f"{media}/{rel}"
-            return f"{base}{media}/{rel}" if media.startswith('/') else f"{base}/{media}/{rel}"
+            # When MEDIA_URL is relative, return a relative URL to avoid leaking request host/IP:port
+            if media.startswith('/'):
+                return f"{media}/{rel}"
+            return f"/{media}/{rel}"
         def to_url(rel: str):
             if not rel:
                 return None
@@ -738,7 +741,10 @@ class VideoDetailView(APIView):
         def url_of(rel: str) -> str:
             if media.startswith('http://') or media.startswith('https://'):
                 return f"{media}/{rel}"
-            return f"{base}{media}/{rel}" if media.startswith('/') else f"{base}/{media}/{rel}"
+            # When MEDIA_URL is relative, return a relative URL to avoid leaking request host/IP:port
+            if media.startswith('/'):
+                return f"{media}/{rel}"
+            return f"/{media}/{rel}"
         def to_url(rel: str):
             if not rel:
                 return None
@@ -810,6 +816,56 @@ class VideoDetailView(APIView):
             'category': ({'id': str(v.category.id), 'name': v.category.name} if getattr(v, 'category', None) else None),
             'tags': tags_out,
         })
+
+    def delete(self, request, pk):
+        v = get_object_or_404(Video, pk=pk)
+        user = getattr(request, 'user', None)
+        if not (user and getattr(user, 'id', None)):
+            raise NotAuthenticated('未登录')
+        if not _can_edit_video(v, user):
+            raise PermissionDenied('无权删除该视频')
+
+        # Collect related file paths (relative to MEDIA_ROOT)
+        src_rel = (getattr(v.video_file_f, 'name', None) or getattr(v, 'video_file', None) or '')
+        thumb_rel = (getattr(v.thumbnail_f, 'name', None) or getattr(v, 'thumbnail', None) or '')
+        low_rel = (getattr(v, 'low_mp4', None) or '')
+        key = os.path.splitext(os.path.basename(src_rel or ''))[0] if src_rel else ''
+        vtt_rel = f"videos/thumbs/{key}.vtt" if key else ''
+        hls_dir_rel = f"videos/hls/{key}" if key else ''
+
+        # Delete DB row first to ensure API semantics; media cleanup best-effort.
+        try:
+            v.delete()
+        except Exception:
+            # If deletion fails, stop here.
+            raise
+
+        def _rm_rel(rel: str):
+            if not rel:
+                return
+            try:
+                if default_storage.exists(rel):
+                    default_storage.delete(rel)
+            except Exception:
+                return
+
+        def _rm_tree_rel(rel_dir: str):
+            if not rel_dir:
+                return
+            try:
+                abs_dir = os.path.join(settings.MEDIA_ROOT, rel_dir)
+                if os.path.isdir(abs_dir):
+                    shutil.rmtree(abs_dir, ignore_errors=True)
+            except Exception:
+                return
+
+        _rm_rel(src_rel)
+        _rm_rel(thumb_rel)
+        _rm_rel(low_rel)
+        _rm_rel(vtt_rel)
+        _rm_tree_rel(hls_dir_rel)
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class VideoBulkDeleteView(APIView):
