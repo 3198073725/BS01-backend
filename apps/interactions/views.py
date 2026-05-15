@@ -134,7 +134,7 @@ class FollowersListView(generics.ListAPIView):
                 if not is_mutual:
                     raise PermissionDenied('仅对互相关注用户可见')
         # 取“我的粉丝”：谁关注了我 -> follower 集合
-        qs = User.objects.filter(following__followed=user)
+        qs = User.objects.filter(following__followed=user).annotate(real_video_count=Count('videos', distinct=True))
         if q:
             qs = qs.filter(Q(username__icontains=q) | Q(nickname__icontains=q) | Q(display_name__icontains=q))
         if order == 'earliest':
@@ -202,7 +202,7 @@ class FollowingListView(generics.ListAPIView):
                 if not is_mutual:
                     raise PermissionDenied('仅对互相关注用户可见')
         # 取“我关注的人”：被我关注的用户 -> followed 集合
-        qs = User.objects.filter(followers__follower=user)
+        qs = User.objects.filter(followers__follower=user).annotate(real_video_count=Count('videos', distinct=True))
         if q:
             qs = qs.filter(Q(username__icontains=q) | Q(nickname__icontains=q) | Q(display_name__icontains=q))
         if order == 'earliest':

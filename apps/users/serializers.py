@@ -9,6 +9,8 @@ from django.db import IntegrityError
 
 
 class UserPublicSerializer(serializers.ModelSerializer):
+    video_count = serializers.SerializerMethodField()
+
     class Meta:
         model = User
         fields = (
@@ -18,6 +20,18 @@ class UserPublicSerializer(serializers.ModelSerializer):
             'total_likes_received', 'total_views_received',
         )
         read_only_fields = fields
+
+    def get_video_count(self, obj: User) -> int:
+        try:
+            v = getattr(obj, 'real_video_count', None)
+            if v is not None:
+                return int(v)
+        except Exception:
+            pass
+        try:
+            return int(getattr(obj, 'video_count', 0) or 0)
+        except Exception:
+            return 0
 
 
 class UserFollowListSerializer(UserPublicSerializer):

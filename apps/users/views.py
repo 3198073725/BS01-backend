@@ -592,7 +592,7 @@ class UserPopupStatsView(APIView):
     返回字段：
     - display_name, nickname, username, profile_picture
     - followers_count, following_count
-    - likes_count, favorites_count, watch_later_count, my_works_count
+    - likes_count, favorites_count, history_count, watch_later_count, my_works_count
 
     支持 query: force=1 强制刷新，默认使用短缓存。
     缓存时长由环境变量 POPUP_STATS_CACHE_SECONDS 控制，默认 120 秒。
@@ -621,6 +621,7 @@ class UserPopupStatsView(APIView):
                 'following_count': 0,
                 'likes_count': 0,
                 'favorites_count': 0,
+                'history_count': 0,
                 'watch_later_count': 0,
                 'my_works_count': 0,
             }
@@ -642,6 +643,7 @@ class UserPopupStatsView(APIView):
                 'following_count': getattr(user, 'following_count', 0),
                 'likes_count': 0,
                 'favorites_count': 0,
+                'history_count': 0,
                 'watch_later_count': 0,
                 'my_works_count': 0,
             }
@@ -659,15 +661,17 @@ class UserPopupStatsView(APIView):
                 except (DatabaseError, Exception):  # 容错：库未迁移或临时异常时不阻断
                     return 0
 
-            # 获赞总数应该是用户所有视频的 like_count 之和
-            total_likes_received = Video.objects.filter(user=user).aggregate(total=models.Sum('like_count'))['total'] or 0
+            # “我的喜欢”应为当前用户点赞过的视频数，而不是其作品收到的点赞总数
+            likes_count = safe_count(Like.objects.filter(user=user, video__isnull=False))
             favorites_count = safe_count(Favorite.objects.filter(user=user))
+            history_count = safe_count(History.objects.filter(user=user))
             watch_later_count = safe_count(WatchLater.objects.filter(user=user))
             my_works_count = safe_count(Video.objects.filter(user=user))
             data = default_data()
             data.update({
-                'likes_count': total_likes_received,
+                'likes_count': likes_count,
                 'favorites_count': favorites_count,
+                'history_count': history_count,
                 'watch_later_count': watch_later_count,
                 'my_works_count': my_works_count,
             })
