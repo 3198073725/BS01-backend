@@ -24,6 +24,8 @@ from django.conf import settings
 from django.core.files.storage import default_storage
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.db import transaction
+from django.db.models import Case, Count, F, IntegerField, Q
 import threading
 import shutil
 
@@ -39,7 +41,6 @@ from apps.interactions.models import Like, Favorite
 from apps.videos.models import WatchLater
 from apps.content.models import Tag, Category
 from apps.tasks.tasks import generate_vtt_and_thumbnail, transcode_video_to_hls
-from django.db.models import Count, Q
 from django.contrib.postgres.search import TrigramSimilarity
 try:
     from PIL import Image as _PIL_Image  # optional, for image validation
@@ -76,6 +77,27 @@ def _is_owner_or_admin(video: Video, viewer) -> bool:
         return str(viewer.id) == str(getattr(video, 'user_id', None))
     except Exception:
         return False
+
+
+def _video_media_key(video: Video) -> str:
+    return os.path.splitext(os.path.basename((getattr(video.video_file_f, 'name', None) or video.video_file or '')))[0]
+
+
+def _video_playable_urls(video: Video, to_url):
+    video_rel = getattr(video.video_file_f, 'name', None) or video.video_file or ''
+    video_url = to_url(video_rel) if (video_rel and default_storage.exists(video_rel)) else None
+    low_mp4_rel = getattr(video, 'low_mp4', None)
+    low_mp4_url = to_url(low_mp4_rel) if (low_mp4_rel and default_storage.exists(low_mp4_rel)) else None
+    key = _video_media_key(video)
+    master_rel = f"videos/hls/{key}/master.m3u8" if key else ''
+    hls_master_url = to_url(master_rel) if (master_rel and default_storage.exists(master_rel)) else None
+    return {
+        'key': key,
+        'video_url': video_url,
+        'low_mp4_url': low_mp4_url,
+        'hls_master_url': hls_master_url,
+        'playable': bool(video_url or low_mp4_url or hls_master_url),
+    }
 
 
 def _can_view_video(video: Video, viewer) -> bool:
@@ -226,6 +248,47 @@ def _hls_output_paths(vid_hex: str) -> tuple[str, str]:
     base_dir = os.path.join(settings.MEDIA_ROOT, 'videos', 'hls', vid_hex)
     master_rel = f"videos/hls/{vid_hex}/master.m3u8"
     return base_dir, master_rel
+
+
+def _collect_video_media_paths(video: Video) -> dict[str, str]:
+    src_rel = (getattr(video.video_file_f, 'name', None) or getattr(video, 'video_file', None) or '')
+    thumb_rel = (getattr(video.thumbnail_f, 'name', None) or getattr(video, 'thumbnail', None) or '')
+    low_rel = (getattr(video, 'low_mp4', None) or '')
+    key = os.path.splitext(os.path.basename(src_rel or ''))[0] if src_rel else ''
+    return {
+        'src_rel': src_rel,
+        'thumb_rel': thumb_rel,
+        'low_rel': low_rel,
+        'vtt_rel': f"videos/thumbs/{key}.vtt" if key else '',
+        'hls_dir_rel': f"videos/hls/{key}" if key else '',
+    }
+
+
+def _cleanup_video_media(media_paths: dict[str, str]) -> None:
+    def _rm_rel(rel: str):
+        if not rel:
+            return
+        try:
+            if default_storage.exists(rel):
+                default_storage.delete(rel)
+        except Exception:
+            return
+
+    def _rm_tree_rel(rel_dir: str):
+        if not rel_dir:
+            return
+        try:
+            abs_dir = os.path.join(settings.MEDIA_ROOT, rel_dir)
+            if os.path.isdir(abs_dir):
+                shutil.rmtree(abs_dir, ignore_errors=True)
+        except Exception:
+            return
+
+    _rm_rel(media_paths.get('src_rel', ''))
+    _rm_rel(media_paths.get('thumb_rel', ''))
+    _rm_rel(media_paths.get('low_rel', ''))
+    _rm_rel(media_paths.get('vtt_rel', ''))
+    _rm_tree_rel(media_paths.get('hls_dir_rel', ''))
 
 
 def _start_hls_transcode(src_abs: str, vid_hex: str, width: int, height: int) -> None:
@@ -495,6 +558,9 @@ class VideoListView(APIView):
                 favorited_ids = set(str(x) for x in Favorite.objects.filter(user=request.user, video_id__in=vid_ids).values_list('video_id', flat=True))
         data = []
         for v in items:
+            media_urls = _video_playable_urls(v, to_url)
+            if not media_urls['playable']:
+                continue
             # tags
             tags = []
             try:
@@ -512,15 +578,15 @@ class VideoListView(APIView):
                 'duration': v.duration,
                 'width': v.width,
                 'height': v.height,
-                'video_url': (lambda r: (to_url(r) if safe_exists(r) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
-                'low_mp4_url': (lambda r: (to_url(r) if safe_exists(r) else None))(getattr(v, 'low_mp4', None)),
+                'video_url': media_urls['video_url'],
+                'low_mp4_url': media_urls['low_mp4_url'],
                 'thumbnail_url': (lambda t: (to_url(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
                 'view_count': v.view_count,
                 'comment_count': v.comment_count,
                 'like_count': v.like_count,
                 'favorite_count': fav_count_map.get(str(v.id), 0),
-                'thumbnail_vtt_url': (lambda key: (to_url(f"videos/thumbs/{key}.vtt") if safe_exists(f"videos/thumbs/{key}.vtt") else None))(os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]),
-                'hls_master_url': (lambda key: (to_url(f"videos/hls/{key}/master.m3u8") if safe_exists(f"videos/hls/{key}/master.m3u8") else None))(os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]),
+                'thumbnail_vtt_url': (lambda key: (to_url(f"videos/thumbs/{key}.vtt") if safe_exists(f"videos/thumbs/{key}.vtt") else None))(media_urls['key']),
+                'hls_master_url': media_urls['hls_master_url'],
                 'author': {
                     'id': str(getattr(v.user, 'id', '') or v.user_id),
                     'name': getattr(v.user, 'display_name', None) or getattr(v.user, 'username', ''),
@@ -572,10 +638,8 @@ class VideoDetailView(APIView):
                 return u
             return url_of(rel)
 
-        vtt_rel = f"videos/thumbs/{os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]}.vtt"
-        vtt_abs = os.path.join(settings.MEDIA_ROOT, vtt_rel)
-        master_rel = f"videos/hls/{os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]}/master.m3u8"
-        master_abs = os.path.join(settings.MEDIA_ROOT, master_rel)
+        media_urls = _video_playable_urls(v, to_url)
+        vtt_rel = f"videos/thumbs/{media_urls['key']}.vtt"
         # 当前用户已点赞/已收藏/已加入稍后看（未登录则为 False）
         liked = False
         favorited = False
@@ -615,8 +679,8 @@ class VideoDetailView(APIView):
             'visibility': getattr(v, 'visibility', 'public'),
             'owner_id': str(v.user_id),
             'can_edit': bool(can_edit),
-            'video_url': (lambda r: (to_url(r) if (r and default_storage.exists(r)) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
-            'low_mp4_url': (lambda r: (to_url(r) if (r and default_storage.exists(r)) else None))(getattr(v, 'low_mp4', None)),
+            'video_url': media_urls['video_url'],
+            'low_mp4_url': media_urls['low_mp4_url'],
             'thumbnail_url': (lambda t: (to_url(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
             'view_count': v.view_count,
             'comment_count': v.comment_count,
@@ -625,7 +689,7 @@ class VideoDetailView(APIView):
             'created_at': v.created_at,
             'published_at': v.published_at,
             'thumbnail_vtt_url': (to_url(vtt_rel) if default_storage.exists(vtt_rel) else None),
-            'hls_master_url': (to_url(master_rel) if default_storage.exists(master_rel) else None),
+            'hls_master_url': media_urls['hls_master_url'],
             'author': {
                 'id': str(getattr(v.user, 'id', '') or v.user_id),
                 'name': getattr(v.user, 'display_name', None) or getattr(v.user, 'username', ''),
@@ -756,11 +820,9 @@ class VideoDetailView(APIView):
                 return u
             return url_of(rel)
 
-        key = os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]
+        media_urls = _video_playable_urls(v, to_url)
+        key = media_urls['key']
         vtt_rel = f"videos/thumbs/{key}.vtt"
-        vtt_abs = os.path.join(settings.MEDIA_ROOT, vtt_rel)
-        master_rel = f"videos/hls/{key}/master.m3u8"
-        master_abs = os.path.join(settings.MEDIA_ROOT, master_rel)
         liked = False
         favorited = False
         # 当前方法已校验作者身份，因此可直接标记为可编辑
@@ -791,7 +853,8 @@ class VideoDetailView(APIView):
             'visibility': getattr(v, 'visibility', 'public'),
             'owner_id': str(v.user_id),
             'can_edit': bool(can_edit),
-            'video_url': (lambda r: (to_url(r) if (r and default_storage.exists(r)) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
+            'video_url': media_urls['video_url'],
+            'low_mp4_url': media_urls['low_mp4_url'],
             'thumbnail_url': (lambda t: (to_url(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
             'view_count': v.view_count,
             'comment_count': v.comment_count,
@@ -800,7 +863,7 @@ class VideoDetailView(APIView):
             'created_at': v.created_at,
             'published_at': v.published_at,
             'thumbnail_vtt_url': (to_url(vtt_rel) if default_storage.exists(vtt_rel) else None),
-            'hls_master_url': (to_url(master_rel) if default_storage.exists(master_rel) else None),
+            'hls_master_url': media_urls['hls_master_url'],
             'author': {
                 'id': str(getattr(v.user, 'id', '') or v.user_id),
                 'name': getattr(v.user, 'display_name', None) or getattr(v.user, 'username', ''),
@@ -825,13 +888,7 @@ class VideoDetailView(APIView):
         if not _can_edit_video(v, user):
             raise PermissionDenied('无权删除该视频')
 
-        # Collect related file paths (relative to MEDIA_ROOT)
-        src_rel = (getattr(v.video_file_f, 'name', None) or getattr(v, 'video_file', None) or '')
-        thumb_rel = (getattr(v.thumbnail_f, 'name', None) or getattr(v, 'thumbnail', None) or '')
-        low_rel = (getattr(v, 'low_mp4', None) or '')
-        key = os.path.splitext(os.path.basename(src_rel or ''))[0] if src_rel else ''
-        vtt_rel = f"videos/thumbs/{key}.vtt" if key else ''
-        hls_dir_rel = f"videos/hls/{key}" if key else ''
+        media_paths = _collect_video_media_paths(v)
 
         # Delete DB row first to ensure API semantics; media cleanup best-effort.
         try:
@@ -840,30 +897,7 @@ class VideoDetailView(APIView):
             # If deletion fails, stop here.
             raise
 
-        def _rm_rel(rel: str):
-            if not rel:
-                return
-            try:
-                if default_storage.exists(rel):
-                    default_storage.delete(rel)
-            except Exception:
-                return
-
-        def _rm_tree_rel(rel_dir: str):
-            if not rel_dir:
-                return
-            try:
-                abs_dir = os.path.join(settings.MEDIA_ROOT, rel_dir)
-                if os.path.isdir(abs_dir):
-                    shutil.rmtree(abs_dir, ignore_errors=True)
-            except Exception:
-                return
-
-        _rm_rel(src_rel)
-        _rm_rel(thumb_rel)
-        _rm_rel(low_rel)
-        _rm_rel(vtt_rel)
-        _rm_tree_rel(hls_dir_rel)
+        _cleanup_video_media(media_paths)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -890,6 +924,7 @@ class VideoBulkDeleteView(APIView):
         
         # 统计各作者被删除的视频数，用于更新 user.video_count
         user_counts = qs.values('user_id').annotate(count=Count('id'))
+        media_paths = [_collect_video_media_paths(v) for v in qs.only('id', 'user_id', 'video_file', 'thumbnail', 'low_mp4', 'video_file_f', 'thumbnail_f')]
         affected = qs.count()
         
         with transaction.atomic():
@@ -904,6 +939,9 @@ class VideoBulkDeleteView(APIView):
                         output_field=IntegerField()
                     )
                 )
+
+        for item in media_paths:
+            _cleanup_video_media(item)
         
         return Response({'removed': int(affected)})
 
@@ -964,6 +1002,10 @@ class VideoRetryTranscodeView(APIView):
         # 仅允许处理已上传完成的视频
         if not v.video_file:
             raise ValidationError({'detail': '视频文件缺失，无法重试'})
+        if getattr(v, 'status', None) == 'published':
+            raise ValidationError({'detail': '已发布视频不能直接重试转码'})
+        if getattr(v, 'status', None) == 'processing':
+            raise ValidationError({'detail': '视频正在处理中，请稍后再试'})
         # 清理状态与错误信息
         v.status = 'processing'
         v.transcode_error = None
@@ -1008,8 +1050,10 @@ class VideoThumbnailUploadView(APIView):
         # validate dimensions/aspect ratio if Pillow available
         try:
             if _PIL_Image is not None:
-                im = _PIL_Image.open(thumb_abs)
-                w, h = im.size
+                with _PIL_Image.open(thumb_abs) as im:
+                    im.verify()
+                with _PIL_Image.open(thumb_abs) as im:
+                    w, h = im.size
                 # minimal dimensions and 16:9 ratio tolerance
                 min_w = int(getattr(settings, 'THUMBNAIL_MIN_WIDTH', 480))
                 min_h = int(getattr(settings, 'THUMBNAIL_MIN_HEIGHT', 270))
@@ -1027,8 +1071,9 @@ class VideoThumbnailUploadView(APIView):
         except ValidationError:
             raise
         except Exception:
-            # ignore validation if pillow not available or image can't be parsed
-            pass
+            try: os.remove(thumb_abs)
+            except Exception: pass
+            raise ValidationError({'file': '无效的图片文件'})
         # update model
         v.thumbnail = thumb_rel[:100]
         v.thumbnail_f = thumb_rel[:200]
@@ -1083,6 +1128,9 @@ class UploadInitView(APIView):
         filesize = int(data.get('filesize') or 0)
         if not filename or filesize <= 0:
             raise ValidationError({'detail': 'filename/filesize 无效'})
+        max_bytes = int(getattr(settings, 'VIDEO_MAX_SIZE_BYTES', 524_288_000))
+        if filesize > max_bytes:
+            raise ValidationError({'detail': '视频文件过大'})
         ext = os.path.splitext(filename)[1].lower()
         allowed_exts = {'.mp4', '.mov', '.m4v', '.webm', '.mkv'}
         if ext not in allowed_exts:
@@ -1115,6 +1163,9 @@ class UploadChunkView(APIView):
             raise ValidationError({'detail': '缺少参数'})
         sess = os.path.join(settings.MEDIA_ROOT, 'uploads', 'sessions', upload_id)
         meta = _load_upload_meta_or_403(request, sess)
+        total = int(math.ceil(int(meta['filesize']) / float(meta['chunk_size'])))
+        if idx < 0 or idx >= total:
+            raise ValidationError({'index': '超出允许范围'})
         os.makedirs(os.path.join(sess, 'chunks'), exist_ok=True)
         out = os.path.join(sess, 'chunks', f'{idx}.part')
         with open(out, 'wb+') as dst:

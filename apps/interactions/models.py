@@ -25,6 +25,15 @@ class Like(models.Model):
             models.Index(fields=['video'], name='idx_like_video'),
             models.Index(fields=['comment'], name='idx_like_comment'),
         ]
+        constraints = [
+            models.CheckConstraint(
+                name='chk_like_exactly_one_target',
+                condition=(
+                    (models.Q(video__isnull=False) & models.Q(comment__isnull=True))
+                    | (models.Q(video__isnull=True) & models.Q(comment__isnull=False))
+                ),
+            ),
+        ]
         verbose_name = "点赞"
         verbose_name_plural = "点赞"
 
@@ -65,6 +74,12 @@ class Comment(models.Model):
             models.Index(fields=['video', '-created_at'], name='idx_comment_video_created'),
             models.Index(fields=['user'], name='idx_comment_user'),
             models.Index(fields=['parent'], name='idx_comment_parent'),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                name='chk_comment_not_self_parent',
+                condition=~models.Q(parent=models.F('id')),
+            ),
         ]
         verbose_name = "评论"
         verbose_name_plural = "评论"
@@ -126,7 +141,7 @@ class Notification(models.Model):
         related_name='interact_notifications', related_query_name='interact_notification',
         verbose_name="接收者"
     )
-    actor = models.ForeignKey('users.User', on_delete=models.CASCADE, db_column='actor_id', related_name='activities', verbose_name="触发者")
+    actor = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL, db_column='actor_id', related_name='activities', verbose_name="触发者")
     verb = models.CharField(max_length=30, verbose_name="类型")
     video = models.ForeignKey('videos.Video', null=True, blank=True, on_delete=models.SET_NULL, db_column='video_id', related_name='notifications', verbose_name="视频")
     comment = models.ForeignKey('interactions.Comment', null=True, blank=True, on_delete=models.SET_NULL, db_column='comment_id', related_name='notifications', verbose_name="评论")

@@ -9,7 +9,7 @@ VidSprout 是一个现代化的视频分享平台，后端基于 Python Django �
 - **业务逻辑层**: 核心逻辑封装在 `services` 与 `serializers` 中，确保逻辑复用。
 - **任务层**: 利用 Celery + Redis 实现视频转码、分发等高耗时异步操作。
 - **存储层**: 
-  - **数据库**: MySQL 处理结构化数据（用户、视频元数据、互动记录）。
+- **数据库**: PostgreSQL（默认）处理结构化数据；也可通过 `DB_ENGINE` 切换到其他 Django 支持的后端。
   - **文件存储**: 支持本地或云端存储转码后的 DASH/HLS 流媒体文件。
   - **多媒体处理**: 深度集成 FFmpeg 和 Bento4 进行自动化切片与加密。
 
@@ -42,7 +42,7 @@ VidSprout 是一个现代化的视频分享平台，后端基于 Python Django �
 
 ### 环境准备
 - Python 3.9+
-- MySQL 8.0+
+- PostgreSQL 14+（推荐）
 - Redis 7.0+
 - FFmpeg & Bento4 工具链（需加入系统 PATH）
 
@@ -56,7 +56,12 @@ VidSprout 是一个现代化的视频分享平台，后端基于 Python Django �
    ```ini
    DEBUG=True
    SECRET_KEY=your_secret_key
-   DATABASE_URL=mysql://user:password@localhost:3306/vidsprout
+   DB_ENGINE=django.db.backends.postgresql
+   DB_NAME=vidsprout
+   DB_USER=vidsprout
+   DB_PASSWORD=change-me
+   DB_HOST=127.0.0.1
+   DB_PORT=5432
    REDIS_URL=redis://localhost:6379/0
    ```
 3. **初始化数据库**
@@ -70,12 +75,12 @@ VidSprout 是一个现代化的视频分享平台，后端基于 Python Django �
    python manage.py runserver
    
    # 启动 Celery Worker (转码任务)
-   celery -A core worker -l info
+   celery -A backend worker -l info
    ```
 
 ## 开发规约
 - **代码风格**: 遵循 PEP8，使用 `isort` 和 `black` 进行格式化。
-- **接口文档**: 访问 `/api/docs/` 查看 Swagger/Redoc 自动生成的文档。
+- **接口文档**: 访问 `/api/schema/swagger-ui/` 或 `/api/schema/redoc/` 查看自动生成的文档。
 - **测试**: 运行 `python manage.py test` 确保核心逻辑覆盖。
 
 ---

@@ -65,6 +65,11 @@ class Report(models.Model):
                 condition=Q(target_type__in=['video', 'comment', 'user']),
                 name='chk_report_target_type',
             ),
+            models.UniqueConstraint(
+                fields=['reporter', 'target_type', 'target_id'],
+                condition=Q(status='pending'),
+                name='uniq_pending_report_per_target',
+            ),
         ]
 
 

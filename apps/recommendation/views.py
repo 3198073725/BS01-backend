@@ -14,12 +14,49 @@ from rest_framework import permissions
 from apps.videos.models import Video
 from apps.interactions.models import Like, Favorite, Follow
 from django.db.models import Count, Q
-from backend.common.pagination import StandardResultsSetPagination
 
 # 在此编写视图，例如：
 # from rest_framework.views import APIView
 # class FeedView(APIView):
 #     ...
+
+
+def _video_media_key(video: Video) -> str:
+    return os.path.splitext(os.path.basename((getattr(video.video_file_f, 'name', None) or video.video_file or '')))[0]
+
+
+def _video_playable_urls(video: Video, to_url):
+    video_rel = getattr(video.video_file_f, 'name', None) or video.video_file or ''
+    video_url = to_url(video_rel) if (video_rel and default_storage.exists(video_rel)) else None
+    key = _video_media_key(video)
+    master_rel = f"videos/hls/{key}/master.m3u8" if key else ''
+    hls_master_url = to_url(master_rel) if (master_rel and default_storage.exists(master_rel)) else None
+    return {
+        'key': key,
+        'video_url': video_url,
+        'hls_master_url': hls_master_url,
+        'playable': bool(video_url or hls_master_url),
+    }
+
+
+def _paginate_playable_videos(qs, page: int, size: int, to_url):
+    start = max(0, (page - 1) * size)
+    total_playable = 0
+    playable_items = []
+    has_next = False
+    for video in qs.iterator(chunk_size=200):
+        media_urls = _video_playable_urls(video, to_url)
+        if not media_urls['playable']:
+            continue
+        if total_playable < start:
+            total_playable += 1
+            continue
+        if len(playable_items) < size:
+            playable_items.append((video, media_urls))
+        else:
+            has_next = True
+        total_playable += 1
+    return playable_items, total_playable, has_next
 
 class RecommendationFeedView(APIView):
     permission_classes = [permissions.AllowAny]
@@ -80,8 +117,9 @@ class RecommendationFeedView(APIView):
                     'view_count','like_count','comment_count','created_at','published_at',
                     'user__id','user__username','user__nickname','user__profile_picture','user__profile_picture_f')
               .order_by('-published_at', '-created_at'))
-        p = StandardResultsSetPagination()
-        items = p.paginate_queryset(qs, request, view=self)
+        items = []
+        playable_items, total_playable, has_next = _paginate_playable_videos(qs, page, size, to_url)
+        items = [v for v, _media_urls in playable_items]
 
         # 当前用户已点赞/已收藏集合（未登录则为空）
         liked_ids = set()
@@ -106,17 +144,15 @@ class RecommendationFeedView(APIView):
             fav_count_map = {}
 
         data = []
-        for v in items:
-            key = os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]
-            vtt_rel = f"videos/thumbs/{key}.vtt"
-            master_rel = f"videos/hls/{key}/master.m3u8"
+        for v, media_urls in playable_items:
+            vtt_rel = f"videos/thumbs/{media_urls['key']}.vtt"
             data.append({
                 'id': str(v.id),
                 'title': v.title,
                 'duration': v.duration,
                 'width': v.width,
                 'height': v.height,
-                'video_url': (lambda r: (to_url(r) if (r and default_storage.exists(r)) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
+                'video_url': media_urls['video_url'],
                 'thumbnail_url': (lambda t: (to_url(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
                 'view_count': v.view_count,
                 'like_count': v.like_count,
@@ -124,7 +160,7 @@ class RecommendationFeedView(APIView):
                 'created_at': v.created_at,
                 'published_at': v.published_at,
                 'thumbnail_vtt_url': (to_url(vtt_rel) if default_storage.exists(vtt_rel) else None),
-                'hls_master_url': (to_url(master_rel) if default_storage.exists(master_rel) else None),
+                'hls_master_url': media_urls['hls_master_url'],
                 'is_featured': bool(getattr(v, 'is_featured', False)),
                 'author': {
                     'id': str(getattr(v.user, 'id', '') or v.user_id),
@@ -136,7 +172,7 @@ class RecommendationFeedView(APIView):
                 'liked': (str(v.id) in liked_ids),
                 'favorited': (str(v.id) in favorited_ids),
             })
-        payload = {'results': data, 'page': page, 'page_size': size, 'total': p.page.paginator.count, 'has_next': p.page.has_next()}
+        payload = {'results': data, 'page': page, 'page_size': size, 'total': total_playable, 'has_next': has_next}
         if not no_cache:
             cache.set(cache_key, payload, timeout=5)
         return Response(payload)
@@ -193,8 +229,8 @@ class FollowingFeedView(APIView):
                     'view_count','like_count','comment_count','created_at','published_at',
                     'user__id','user__username','user__nickname','user__profile_picture','user__profile_picture_f')
               .order_by('-published_at', '-created_at'))
-        p = StandardResultsSetPagination()
-        items = p.paginate_queryset(qs, request, view=self)
+        playable_items, total_playable, has_next = _paginate_playable_videos(qs, page, size, to_url)
+        items = [v for v, _media_urls in playable_items]
 
         liked_ids = set()
         favorited_ids = set()
@@ -216,17 +252,15 @@ class FollowingFeedView(APIView):
             fav_count_map = {}
 
         data = []
-        for v in items:
-            key = os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]
-            vtt_rel = f"videos/thumbs/{key}.vtt"
-            master_rel = f"videos/hls/{key}/master.m3u8"
+        for v, media_urls in playable_items:
+            vtt_rel = f"videos/thumbs/{media_urls['key']}.vtt"
             data.append({
                 'id': str(v.id),
                 'title': v.title,
                 'duration': v.duration,
                 'width': v.width,
                 'height': v.height,
-                'video_url': (lambda r: (to_url(r) if (r and default_storage.exists(r)) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
+                'video_url': media_urls['video_url'],
                 'thumbnail_url': (lambda t: (to_url(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
                 'view_count': v.view_count,
                 'like_count': v.like_count,
@@ -234,7 +268,7 @@ class FollowingFeedView(APIView):
                 'created_at': v.created_at,
                 'published_at': v.published_at,
                 'thumbnail_vtt_url': (to_url(vtt_rel) if default_storage.exists(vtt_rel) else None),
-                'hls_master_url': (to_url(master_rel) if default_storage.exists(master_rel) else None),
+                'hls_master_url': media_urls['hls_master_url'],
                 'author': {
                     'id': str(getattr(v.user, 'id', '') or v.user_id),
                     'name': getattr(v.user, 'display_name', None) or getattr(v.user, 'username', ''),
@@ -245,7 +279,7 @@ class FollowingFeedView(APIView):
                 'liked': (str(v.id) in liked_ids),
                 'favorited': (str(v.id) in favorited_ids),
             })
-        return Response({'results': data, 'page': page, 'page_size': size, 'total': p.page.paginator.count, 'has_next': p.page.has_next()})
+        return Response({'results': data, 'page': page, 'page_size': size, 'total': total_playable, 'has_next': has_next})
 
 
 class FeaturedFeedView(APIView):
@@ -297,8 +331,8 @@ class FeaturedFeedView(APIView):
                     'view_count','like_count','comment_count','created_at','published_at',
                     'user__id','user__username','user__nickname','user__profile_picture','user__profile_picture_f')
               .order_by('-is_featured', '-published_at', '-created_at'))
-        p = StandardResultsSetPagination()
-        items = p.paginate_queryset(qs, request, view=self)
+        playable_items, total_playable, has_next = _paginate_playable_videos(qs, page, size, to_url)
+        items = [v for v, _media_urls in playable_items]
 
         liked_ids = set()
         favorited_ids = set()
@@ -321,17 +355,15 @@ class FeaturedFeedView(APIView):
             fav_count_map = {}
 
         data = []
-        for v in items:
-            key = os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]
-            vtt_rel = f"videos/thumbs/{key}.vtt"
-            master_rel = f"videos/hls/{key}/master.m3u8"
+        for v, media_urls in playable_items:
+            vtt_rel = f"videos/thumbs/{media_urls['key']}.vtt"
             data.append({
                 'id': str(v.id),
                 'title': v.title,
                 'duration': v.duration,
                 'width': v.width,
                 'height': v.height,
-                'video_url': (lambda r: (to_url(r) if (r and default_storage.exists(r)) else None))((getattr(v.video_file_f, 'name', None) or v.video_file or '')),
+                'video_url': media_urls['video_url'],
                 'thumbnail_url': (lambda t: (to_url(t) if t else None))((getattr(v.thumbnail_f, 'name', None) or v.thumbnail)),
                 'view_count': v.view_count,
                 'like_count': v.like_count,
@@ -339,7 +371,7 @@ class FeaturedFeedView(APIView):
                 'created_at': v.created_at,
                 'published_at': v.published_at,
                 'thumbnail_vtt_url': (to_url(vtt_rel) if default_storage.exists(vtt_rel) else None),
-                'hls_master_url': (to_url(master_rel) if default_storage.exists(master_rel) else None),
+                'hls_master_url': media_urls['hls_master_url'],
                 'author': {
                     'id': str(getattr(v.user, 'id', '') or v.user_id),
                     'name': getattr(v.user, 'display_name', None) or getattr(v.user, 'username', ''),
@@ -350,4 +382,4 @@ class FeaturedFeedView(APIView):
                 'liked': (str(v.id) in liked_ids),
                 'favorited': (str(v.id) in favorited_ids),
             })
-        return Response({'results': data, 'page': page, 'page_size': size, 'total': p.page.paginator.count, 'has_next': p.page.has_next()})
+        return Response({'results': data, 'page': page, 'page_size': size, 'total': total_playable, 'has_next': has_next})

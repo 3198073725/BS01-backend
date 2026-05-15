@@ -53,6 +53,7 @@ class Video(models.Model):
             models.CheckConstraint(condition=Q(status__in=['draft', 'processing', 'published', 'banned']), name='chk_video_status'),
             models.CheckConstraint(condition=Q(upload_status__in=['pending', 'uploading', 'completed', 'failed']), name='chk_upload_status'),
             models.CheckConstraint(condition=Q(duration__gte=0) & Q(width__gte=0) & Q(height__gte=0) & Q(file_size__gte=0), name='chk_video_nonnegatives'),
+            models.CheckConstraint(condition=Q(view_count__gte=0) & Q(like_count__gte=0) & Q(comment_count__gte=0), name='chk_video_counters_nonneg'),
             models.CheckConstraint(condition=Q(visibility__in=['public','unlisted','private']), name='chk_video_visibility'),
         ]
         verbose_name = "视频"

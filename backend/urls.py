@@ -32,8 +32,82 @@ import mimetypes
 import re
 
 
+def _is_owner_or_admin(video, viewer) -> bool:
+    try:
+        if not viewer or not getattr(viewer, 'id', None):
+            return False
+        if getattr(viewer, 'is_staff', False):
+            return True
+        return str(viewer.id) == str(getattr(video, 'user_id', None))
+    except Exception:
+        return False
+
+
+def _can_view_video(video, viewer) -> bool:
+    try:
+        status = getattr(video, 'status', 'draft')
+        if status == 'banned':
+            return bool(viewer and getattr(viewer, 'is_staff', False))
+        if status != 'published' and not _is_owner_or_admin(video, viewer):
+            return False
+        if getattr(video, 'visibility', 'public') == 'private' and not _is_owner_or_admin(video, viewer):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _extract_video_key_from_media_path(path: str):
+    parts = [p for p in str(path or '').split('/') if p]
+    if len(parts) < 2 or parts[0] != 'videos':
+        return None
+    if parts[1] == 'hls' and len(parts) >= 3:
+        return parts[2]
+    if parts[1] == 'low' and len(parts) >= 3:
+        return os.path.splitext(parts[2])[0]
+    if parts[1] == 'thumbs' and len(parts) >= 3:
+        if len(parts) >= 4 and parts[2].endswith('_vtt'):
+            return parts[2][:-4]
+        stem = os.path.splitext(parts[2])[0]
+        if stem.endswith('_custom'):
+            stem = stem[:-7]
+        return stem
+    return os.path.splitext(parts[-1])[0]
+
+
+def _video_from_media_path(path: str):
+    key = _extract_video_key_from_media_path(path)
+    if not key:
+        return None
+    from django.db.models import Q
+    from apps.videos.models import Video
+
+    candidates = Video.objects.filter(
+        Q(video_file__icontains=key) | Q(video_file_f__icontains=key)
+    ).only('id', 'user_id', 'status', 'visibility', 'video_file', 'video_file_f')
+    for video in candidates:
+        rel = getattr(getattr(video, 'video_file_f', None), 'name', None) or getattr(video, 'video_file', '')
+        if os.path.splitext(os.path.basename(str(rel or '')))[0] == key:
+            return video
+    return None
+
+
 def health(request):
     return JsonResponse({"status": "ok"})
+
+
+def _media_content_type(fullpath: str) -> tuple[str, str | None]:
+    ext = os.path.splitext(fullpath)[1].lower()
+    if ext == '.m3u8':
+        return 'application/vnd.apple.mpegurl', None
+    if ext == '.ts':
+        return 'video/mp2t', None
+    if ext == '.mpd':
+        return 'application/dash+xml', None
+    if ext == '.vtt':
+        return 'text/vtt', None
+    ctype, encoding = mimetypes.guess_type(fullpath)
+    return ctype or 'application/octet-stream', encoding
 
 
 def media_serve_with_range(request, path, document_root=None):
@@ -48,12 +122,17 @@ def media_serve_with_range(request, path, document_root=None):
     except Exception:
         raise Http404("Not Found")
 
+    video = _video_from_media_path(path)
+    if video is not None:
+        viewer = getattr(request, 'user', None)
+        if not _can_view_video(video, viewer):
+            raise Http404("Not Found")
+
     if not os.path.exists(fullpath) or not os.path.isfile(fullpath):
         raise Http404("Not Found")
 
     file_size = os.path.getsize(fullpath)
-    ctype, encoding = mimetypes.guess_type(fullpath)
-    content_type = ctype or 'application/octet-stream'
+    content_type, encoding = _media_content_type(fullpath)
     range_header = request.META.get('HTTP_RANGE', '')
 
     # Always advertise Range support.
@@ -151,7 +230,7 @@ urlpatterns = [
     path('api/schema/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
 ]
 
-if settings.DEBUG or str(os.getenv('SERVE_MEDIA', 'true')).lower() in ('true','1','yes'):
+if settings.DEBUG or str(os.getenv('SERVE_MEDIA', 'false')).lower() in ('true','1','yes'):
     # 使用 Django 提供的静态文件视图服务媒体文件（仅开发/内网调试场景）
     urlpatterns += [
         re_path(r'^media/(?P<path>.*)$', media_serve_with_range, {

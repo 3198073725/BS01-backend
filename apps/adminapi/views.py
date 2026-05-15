@@ -50,6 +50,15 @@ def _audit(request, verb: str, target_type: str | None = None, target_id: str | 
     except Exception:
         pass
 
+
+def _report_target_allowed_actions(target_type: str) -> set[str]:
+    mapping = {
+        'video': {'dismiss', 'warn', 'delete_content', 'escalate'},
+        'comment': {'dismiss', 'warn', 'delete_content', 'escalate'},
+        'user': {'dismiss', 'warn', 'ban_user', 'ban_temp', 'escalate'},
+    }
+    return mapping.get(str(target_type or '').strip().lower(), set())
+
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from apps.users.serializers import UserMeSerializer, UserFollowListSerializer
 
@@ -664,7 +673,9 @@ class AdminVideosBulkUpdateView(APIView):
             qs.update(**updates)
         if set_status:
             if set_status == 'published':
-                qs.update(status='published', published_at=timezone.now())
+                now = timezone.now()
+                qs.filter(status='published').update(status='published')
+                qs.exclude(status='published').update(status='published', published_at=now)
             else:
                 qs.update(status=set_status, published_at=None)
         try:
@@ -727,7 +738,18 @@ class AdminVideosBatchApproveView(APIView):
         qs = Video.objects.filter(id__in=ids)
         affected = qs.count()
         if action == 'approve':
-            qs.update(status='published', published_at=timezone.now(), transcode_error=None)
+            try:
+                bad = qs.filter(user__is_verified=False).values_list('id', flat=True)
+                bad_list = [str(x) for x in bad]
+                if bad_list:
+                    raise ValidationError({'action': '存在作者邮箱未验证的视频，禁止通过', 'video_ids': bad_list[:10]})
+            except ValidationError:
+                raise
+            except Exception:
+                raise ValidationError({'action': '审核通过校验失败'})
+            now = timezone.now()
+            qs.filter(status='published').update(status='published', transcode_error=None)
+            qs.exclude(status='published').update(status='published', published_at=now, transcode_error=None)
             try:
                 _audit(request, 'video.batch_approve', 'video', None, {'count': len(ids), 'affected': affected})
             except Exception:
@@ -1529,6 +1551,29 @@ class AdminReportHandleView(APIView):
         valid_actions = ['dismiss', 'warn', 'delete_content', 'ban_user', 'ban_temp', 'escalate']
         if action not in valid_actions:
             raise ValidationError({'action': f'非法值，可选: {", ".join(valid_actions)}'})
+        allowed_actions = _report_target_allowed_actions(report.target_type)
+        if action not in allowed_actions:
+            raise ValidationError({'action': f'{report.target_type} 举报不支持动作 {action}'})
+
+        target_user_id = None
+        video_id = None
+        comment_id = None
+        try:
+            if report.target_type == 'video':
+                v = Video.objects.filter(id=report.target_id).only('id', 'user_id').first()
+                if v:
+                    target_user_id = v.user_id
+                    video_id = v.id
+            elif report.target_type == 'comment':
+                c = Comment.objects.filter(id=report.target_id).only('id', 'user_id', 'video_id').first()
+                if c:
+                    target_user_id = c.user_id
+                    video_id = c.video_id
+                    comment_id = c.id
+            elif report.target_type == 'user':
+                target_user_id = report.target_id
+        except Exception:
+            pass
 
         with transaction.atomic():
             # 更新举报状态
@@ -1554,12 +1599,36 @@ class AdminReportHandleView(APIView):
                         from apps.videos.models import Video
                         v = Video.objects.filter(id=report.target_id).first()
                         if v:
+                            try:
+                                if v.user_id:
+                                    from apps.interactions.models import Notification
+                                    Notification.objects.create(
+                                        user_id=v.user_id,
+                                        actor_id=request.user.id,
+                                        verb='content_removed',
+                                        video_id=None,
+                                        comment_id=None,
+                                    )
+                            except Exception:
+                                pass
                             v.delete()
                             action_result = '视频已删除'
                     elif report.target_type == 'comment':
                         from apps.interactions.models import Comment
                         c = Comment.objects.filter(id=report.target_id).first()
                         if c:
+                            try:
+                                if c.user_id:
+                                    from apps.interactions.models import Notification
+                                    Notification.objects.create(
+                                        user_id=c.user_id,
+                                        actor_id=request.user.id,
+                                        verb='content_removed',
+                                        video_id=None,
+                                        comment_id=None,
+                                    )
+                            except Exception:
+                                pass
                             c.delete()
                             action_result = '评论已删除'
                 elif action == 'ban_user' and report.target_type == 'user':
@@ -1589,29 +1658,10 @@ class AdminReportHandleView(APIView):
         # 发送站内通知给被处理用户
         try:
             from apps.interactions.models import Notification
-            target_user_id = None
-            video_id = None
-            comment_id = None
-
-            # 获取目标对象作者
-            if report.target_type == 'video':
-                from apps.videos.models import Video
-                v = Video.objects.filter(id=report.target_id).first()
-                if v:
-                    target_user_id = v.user_id
-                    video_id = v.id
-            elif report.target_type == 'comment':
-                from apps.interactions.models import Comment
-                c = Comment.objects.filter(id=report.target_id).first()
-                if c:
-                    target_user_id = c.user_id
-                    video_id = c.video_id
-                    comment_id = c.id
-            elif report.target_type == 'user':
-                target_user_id = report.target_id
-
             # 发送通知
-            if target_user_id:
+            if target_user_id and action != 'delete_content':
+                notify_video_id = video_id
+                notify_comment_id = comment_id
                 verb_map = {
                     'dismiss': 'report_dismissed',
                     'warn': 'report_warned',
@@ -1623,10 +1673,10 @@ class AdminReportHandleView(APIView):
                 verb = verb_map.get(action, 'report_handled')
                 Notification.objects.create(
                     user_id=target_user_id,
-                    actor=request.user,
+                    actor_id=request.user.id,
                     verb=verb,
-                    video_id=video_id,
-                    comment_id=comment_id
+                    video_id=notify_video_id,
+                    comment_id=notify_comment_id
                 )
         except Exception:
             pass  # 通知失败不影响主流程

@@ -60,6 +60,18 @@ def _safe_rm(path: str) -> None:
         pass
 
 
+def _save_transcode_failure(video: Video, error: str) -> None:
+    try:
+        fields = ['transcode_error', 'updated_at']
+        video.transcode_error = (error or '')[:200]
+        if getattr(video, 'status', None) == 'processing':
+            video.status = 'draft'
+            fields.append('status')
+        video.save(update_fields=fields)
+    except Exception:
+        pass
+
+
 def _probe_video(file_path: str) -> tuple[int, int, int]:
     try:
         cmd = [
@@ -248,6 +260,7 @@ def transcode_video_to_hls(self, video_id: str) -> dict:
                 entries.append((p['name'], p['h']))
         if not entries:
             error = 'no_variants'
+            _save_transcode_failure(v, error)
             return {'ok': False, 'error': error}
 
         # 生成低清 MP4 供 processing 占位播放
@@ -295,16 +308,10 @@ def transcode_video_to_hls(self, video_id: str) -> dict:
             v.save(update_fields=fields)
         except Exception:
             pass
-        # Do NOT auto-publish here. Keep status as-is (e.g., 'processing').
-        # Admins will review and publish explicitly in the admin console.
         return {'ok': True, 'master_rel': master_rel, 'low_mp4': low_rel}
     except Exception as e:
         error = str(e)[:200]
-        try:
-            v.transcode_error = error
-            v.save(update_fields=['transcode_error', 'updated_at'])
-        except Exception:
-            pass
+        _save_transcode_failure(v, error)
         return {'ok': False, 'error': error}
 
 

@@ -11,6 +11,7 @@ from rest_framework import permissions, status, generics, serializers
 from rest_framework.exceptions import ValidationError, PermissionDenied, NotFound
 from django.db import IntegrityError
 from django.db.models import Q, Exists, OuterRef, Value, IntegerField, Case, When, Count
+from django.utils import timezone
 
 from apps.interactions.models import Follow, Like, Favorite, History, Comment, Notification
 from django.db import IntegrityError, transaction
@@ -22,6 +23,22 @@ from apps.users.serializers import UserPublicSerializer, UserFollowListSerialize
 from apps.videos.models import Video, WatchLater
 from django.conf import settings
 from backend.common.pagination import StandardResultsSetPagination
+
+
+def _parse_uuid(value, field_name: str) -> str:
+    try:
+        return str(UUID(str(value)))
+    except Exception:
+        raise ValidationError({field_name: '格式不正确'})
+
+
+def _parse_uuid_list(values, field_name: str, max_count: int = 200) -> list[str]:
+    if not isinstance(values, list) or not values:
+        raise ValidationError({field_name: '必须为非空数组'})
+    cleaned = [str(i) for i in values if str(i)]
+    if len(cleaned) > max_count:
+        raise ValidationError({field_name: f'一次最多处理 {max_count} 个'})
+    return [_parse_uuid(v, field_name) for v in cleaned]
 
 
 class FollowCreateView(APIView):
@@ -40,6 +57,7 @@ class FollowCreateView(APIView):
         target_id = request.data.get('user_id')
         if not target_id:
             raise ValidationError({'user_id': '必填'})
+        target_id = _parse_uuid(target_id, 'user_id')
         if str(target_id) == str(request.user.id):
             raise ValidationError({'user_id': '不能关注自己'})
         target = get_object_or_404(User, pk=target_id)
@@ -69,6 +87,7 @@ class UnfollowView(APIView):
         target_id = request.data.get('user_id')
         if not target_id:
             raise ValidationError({'user_id': '必填'})
+        target_id = _parse_uuid(target_id, 'user_id')
         if str(target_id) == str(request.user.id):
             raise ValidationError({'user_id': '不能取关自己'})
         Follow.objects.filter(follower=request.user, followed_id=target_id).delete()
@@ -92,6 +111,7 @@ class FollowersListView(generics.ListAPIView):
         order = (self.request.query_params.get('order') or 'latest').lower()
         user = None
         if uid:
+            uid = _parse_uuid(uid, 'user_id')
             user = get_object_or_404(User, pk=uid)
         elif self.request.user and self.request.user.is_authenticated:
             user = self.request.user
@@ -160,6 +180,7 @@ class FollowingListView(generics.ListAPIView):
         order = (self.request.query_params.get('order') or 'latest').lower()
         user = None
         if uid:
+            uid = _parse_uuid(uid, 'user_id')
             user = get_object_or_404(User, pk=uid)
         elif self.request.user and self.request.user.is_authenticated:
             user = self.request.user
@@ -251,6 +272,7 @@ class _BaseUserList(APIView):
     def _resolve_user(self, request):
         uid = request.query_params.get('user_id')
         if uid:
+            uid = _parse_uuid(uid, 'user_id')
             return get_object_or_404(User, pk=uid)
         if request.user and request.user.is_authenticated:
             return request.user
@@ -276,20 +298,14 @@ class LikesListView(_BaseUserList):
         viewer = request.user if (request.user and request.user.is_authenticated) else None
         _ensure_privacy_access(user, viewer)
         p = StandardResultsSetPagination()
-        qs = Like.objects.filter(user=user).order_by('-created_at')
-        rows = list(p.paginate_queryset(qs, request, view=self))
-        # 批量取视频（仅必要字段）
-        vid_ids = [r.video_id for r in rows]
         allow_all = bool(viewer and (str(viewer.id) == str(user.id) or getattr(viewer, 'is_staff', False)))
-        base_qs = Video.objects.filter(id__in=vid_ids).only('id','title','view_count','like_count','thumbnail','thumbnail_f')
+        qs = Like.objects.filter(user=user, video__isnull=False).select_related('video').order_by('-created_at')
         if not allow_all:
-            base_qs = base_qs.filter(visibility='public', status='published')
-        vmap = {str(v.id): v for v in base_qs}
+            qs = qs.filter(video__visibility='public', video__status='published')
+        rows = list(p.paginate_queryset(qs, request, view=self))
         items = []
         for r in rows:
-            v = vmap.get(str(r.video_id))
-            if not v:
-                continue
+            v = r.video
             thumb = getattr(v.thumbnail_f, 'name', None) or v.thumbnail
             items.append({
                 'id': str(v.id),
@@ -313,16 +329,14 @@ class RelationshipView(APIView):
         uid = request.query_params.get('user_id')
         if not uid:
             raise ValidationError({'user_id': '必填'})
+        uid = _parse_uuid(uid, 'user_id')
         target = get_object_or_404(User, pk=uid)
         viewer = request.user if (request.user and request.user.is_authenticated) else None
         following = False  # 我是否关注对方
         followed_by = False  # 对方是否关注我
         if viewer:
-            try:
-                following = Follow.objects.filter(follower=viewer, followed=target).exists()
-                followed_by = Follow.objects.filter(follower=target, followed=viewer).exists()
-            except Exception:
-                following = False; followed_by = False
+            following = Follow.objects.filter(follower=viewer, followed=target).exists()
+            followed_by = Follow.objects.filter(follower=target, followed=viewer).exists()
         return Response({'user_id': str(target.id), 'following': bool(following), 'followed_by': bool(followed_by), 'mutual': bool(following and followed_by)})
 
 
@@ -332,19 +346,14 @@ class FavoritesListView(_BaseUserList):
         viewer = request.user if (request.user and request.user.is_authenticated) else None
         _ensure_privacy_access(user, viewer)
         p = StandardResultsSetPagination()
-        qs = Favorite.objects.filter(user=user).order_by('-created_at')
-        rows = list(p.paginate_queryset(qs, request, view=self))
-        vid_ids = [r.video_id for r in rows]
         allow_all = bool(viewer and (str(viewer.id) == str(user.id) or getattr(viewer, 'is_staff', False)))
-        base_qs = Video.objects.filter(id__in=vid_ids).only('id','title','view_count','like_count','thumbnail','thumbnail_f')
+        qs = Favorite.objects.filter(user=user).select_related('video').order_by('-created_at')
         if not allow_all:
-            base_qs = base_qs.filter(visibility='public', status='published')
-        vmap = {str(v.id): v for v in base_qs}
+            qs = qs.filter(video__visibility='public', video__status='published')
+        rows = list(p.paginate_queryset(qs, request, view=self))
         items = []
         for r in rows:
-            v = vmap.get(str(r.video_id))
-            if not v:
-                continue
+            v = r.video
             thumb = getattr(v.thumbnail_f, 'name', None) or v.thumbnail
             items.append({
                 'id': str(v.id),
@@ -367,19 +376,14 @@ class WatchLaterListView(_BaseUserList):
         viewer = request.user if (request.user and request.user.is_authenticated) else None
         _ensure_privacy_access(user, viewer)
         p = StandardResultsSetPagination()
-        qs = WatchLater.objects.filter(user=user).order_by('-created_at')
-        rows = list(p.paginate_queryset(qs, request, view=self))
-        vid_ids = [r.video_id for r in rows]
         allow_all = bool(viewer and (str(viewer.id) == str(user.id) or getattr(viewer, 'is_staff', False)))
-        base_qs = Video.objects.filter(id__in=vid_ids).only('id','title','view_count','like_count','thumbnail','thumbnail_f')
+        qs = WatchLater.objects.filter(user=user).select_related('video').order_by('-created_at')
         if not allow_all:
-            base_qs = base_qs.filter(visibility='public', status='published')
-        vmap = {str(v.id): v for v in base_qs}
+            qs = qs.filter(video__visibility='public', video__status='published')
+        rows = list(p.paginate_queryset(qs, request, view=self))
         items = []
         for r in rows:
-            v = vmap.get(str(r.video_id))
-            if not v:
-                continue
+            v = r.video
             thumb = getattr(v.thumbnail_f, 'name', None) or v.thumbnail
             items.append({
                 'id': str(v.id),
@@ -402,19 +406,14 @@ class HistoryListView(_BaseUserList):
         viewer = request.user if (request.user and request.user.is_authenticated) else None
         _ensure_privacy_access(user, viewer)
         p = StandardResultsSetPagination()
-        qs = History.objects.filter(user=user).order_by('-created_at')
-        rows = list(p.paginate_queryset(qs, request, view=self))
-        vid_ids = [r.video_id for r in rows]
         allow_all = bool(viewer and (str(viewer.id) == str(user.id) or getattr(viewer, 'is_staff', False)))
-        base_qs = Video.objects.filter(id__in=vid_ids).only('id','title','view_count','like_count','thumbnail','thumbnail_f')
+        qs = History.objects.filter(user=user).select_related('video').order_by('-created_at')
         if not allow_all:
-            base_qs = base_qs.filter(visibility='public', status='published')
-        vmap = {str(v.id): v for v in base_qs}
+            qs = qs.filter(video__visibility='public', video__status='published')
+        rows = list(p.paginate_queryset(qs, request, view=self))
         items = []
         for r in rows:
-            v = vmap.get(str(r.video_id))
-            if not v:
-                continue
+            v = r.video
             thumb = getattr(v.thumbnail_f, 'name', None) or v.thumbnail
             items.append({
                 'id': str(v.id),
@@ -438,11 +437,7 @@ class LikesBulkUnlikeView(APIView):
 
     def post(self, request):
         ids = request.data.get('video_ids') or request.data.get('ids')
-        if not isinstance(ids, list) or not ids:
-            raise ValidationError({'video_ids': '必须为非空数组'})
-        ids = [str(i) for i in ids if str(i)]
-        if len(ids) > 200:
-            raise ValidationError({'video_ids': '一次最多处理 200 个'})
+        ids = _parse_uuid_list(ids, 'video_ids')
         qs = Like.objects.filter(user=request.user, video_id__in=ids)
         removed, _ = qs.delete()
         return Response({'removed': int(removed)})
@@ -453,11 +448,7 @@ class FavoritesBulkRemoveView(APIView):
 
     def post(self, request):
         ids = request.data.get('video_ids') or request.data.get('ids')
-        if not isinstance(ids, list) or not ids:
-            raise ValidationError({'video_ids': '必须为非空数组'})
-        ids = [str(i) for i in ids if str(i)]
-        if len(ids) > 200:
-            raise ValidationError({'video_ids': '一次最多处理 200 个'})
+        ids = _parse_uuid_list(ids, 'video_ids')
         qs = Favorite.objects.filter(user=request.user, video_id__in=ids)
         removed, _ = qs.delete()
         return Response({'removed': int(removed)})
@@ -468,11 +459,7 @@ class WatchLaterBulkRemoveView(APIView):
 
     def post(self, request):
         ids = request.data.get('video_ids') or request.data.get('ids')
-        if not isinstance(ids, list) or not ids:
-            raise ValidationError({'video_ids': '必须为非空数组'})
-        ids = [str(i) for i in ids if str(i)]
-        if len(ids) > 200:
-            raise ValidationError({'video_ids': '一次最多处理 200 个'})
+        ids = _parse_uuid_list(ids, 'video_ids')
         qs = WatchLater.objects.filter(user=request.user, video_id__in=ids)
         removed, _ = qs.delete()
         return Response({'removed': int(removed)})
@@ -483,11 +470,7 @@ class HistoryBulkRemoveView(APIView):
 
     def post(self, request):
         ids = request.data.get('video_ids') or request.data.get('ids')
-        if not isinstance(ids, list) or not ids:
-            raise ValidationError({'video_ids': '必须为非空数组'})
-        ids = [str(i) for i in ids if str(i)]
-        if len(ids) > 200:
-            raise ValidationError({'video_ids': '一次最多处理 200 个'})
+        ids = _parse_uuid_list(ids, 'video_ids')
         qs = History.objects.filter(user=request.user, video_id__in=ids)
         removed, _ = qs.delete()
         return Response({'removed': int(removed)})
@@ -500,11 +483,7 @@ class LikeToggleView(APIView):
         vid = request.data.get('video_id') or request.data.get('id')
         if not vid:
             raise ValidationError({'video_id': '必填'})
-        # 校验 UUID 格式，避免 ValueError 导致 500
-        try:
-            UUID(str(vid))
-        except Exception:
-            raise ValidationError({'video_id': '格式不正确'})
+        vid = _parse_uuid(vid, 'video_id')
         v = get_object_or_404(Video, pk=vid)
         if getattr(v, 'status', '') != 'published':
             raise NotFound('资源不存在')
@@ -536,6 +515,7 @@ class FavoriteToggleView(APIView):
         vid = request.data.get('video_id') or request.data.get('id')
         if not vid:
             raise ValidationError({'video_id': '必填'})
+        vid = _parse_uuid(vid, 'video_id')
         v = get_object_or_404(Video, pk=vid)
         if getattr(v, 'status', '') != 'published':
             raise NotFound('资源不存在')
@@ -567,11 +547,7 @@ class WatchLaterToggleView(APIView):
         vid = request.data.get('video_id') or request.data.get('id')
         if not vid:
             raise ValidationError({'video_id': '必填'})
-        # 校验 UUID，避免 ValueError
-        try:
-            UUID(str(vid))
-        except Exception:
-            raise ValidationError({'video_id': '格式不正确'})
+        vid = _parse_uuid(vid, 'video_id')
         v = get_object_or_404(Video, pk=vid)
         if getattr(v, 'status', '') != 'published':
             raise NotFound('资源不存在')
@@ -609,6 +585,7 @@ class HistoryRecordView(APIView):
         vid = request.data.get('video_id') or request.data.get('id')
         if not vid:
             raise ValidationError({'video_id': '必填'})
+        vid = _parse_uuid(vid, 'video_id')
         v = get_object_or_404(Video, pk=vid)
         if getattr(v, 'status', '') != 'published':
             raise NotFound('资源不存在')
@@ -664,6 +641,7 @@ class HistoryRecordView(APIView):
             )
             if not created:
                 History.objects.filter(user=request.user, video=v).update(
+                    created_at=timezone.now(),
                     progress=Case(
                         When(progress__gte=p, then=F('progress')),
                         default=Value(p),
@@ -682,6 +660,7 @@ class HistoryRecordView(APIView):
         except IntegrityError:
             # 并发极端情况：再次回退到 UPDATE，然后读取
             History.objects.filter(user=request.user, video=v).update(
+                created_at=timezone.now(),
                 progress=Case(
                     When(progress__gte=p, then=F('progress')),
                     default=Value(p),
@@ -781,6 +760,7 @@ class CommentsListCreateView(APIView):
         vid = request.query_params.get('video_id')
         if not vid:
             raise ValidationError({'video_id': '缺少视频ID'})
+        vid = _parse_uuid(vid, 'video_id')
         # 私密视频仅作者/管理员可查看评论列表
         v = get_object_or_404(Video, id=vid)
         if getattr(v, 'status', '') != 'published':
@@ -805,7 +785,7 @@ class CommentsListCreateView(APIView):
             raise PermissionDenied('未登录')
         data = CommentCreateSerializer(data=request.data)
         data.is_valid(raise_exception=True)
-        video_id = data.validated_data['video_id']
+        video_id = _parse_uuid(data.validated_data['video_id'], 'video_id')
         content = (data.validated_data['content'] or '').strip()
         parent_id = data.validated_data.get('parent_id') or None
         if not content:
@@ -820,9 +800,12 @@ class CommentsListCreateView(APIView):
                 raise NotFound('资源不存在')
         parent = None
         if parent_id:
+            parent_id = _parse_uuid(parent_id, 'parent_id')
             parent = get_object_or_404(Comment, id=parent_id)
             if str(parent.video_id) != str(video.id):
                 raise ValidationError({'parent_id': '父评论不属于该视频'})
+            if getattr(parent, 'parent_id', None):
+                raise ValidationError({'parent_id': '暂不支持回复二级评论'})
         # 若作者关闭评论，任何用户均不可评论（完全关闭）
         if not bool(getattr(video, 'allow_comments', True)):
             raise PermissionDenied('评论已关闭')
@@ -842,6 +825,7 @@ class CommentRepliesListView(APIView):
         pid = request.query_params.get('parent_id')
         if not pid:
             raise ValidationError({'parent_id': '缺少父评论ID'})
+        pid = _parse_uuid(pid, 'parent_id')
         parent = get_object_or_404(Comment, id=pid)
         # 校验所属视频可见性（私密仅作者/管理员）
         video = None
@@ -878,6 +862,7 @@ class CommentDetailView(APIView):
     throttle_scope = 'comments'
 
     def delete(self, request, pk):
+        pk = _parse_uuid(pk, 'comment_id')
         c = get_object_or_404(Comment, id=pk)
         if (not request.user.is_staff) and (str(c.user_id) != str(request.user.id)):
             raise PermissionDenied('无权删除该评论')
@@ -890,6 +875,7 @@ class CommentLikeToggleView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, pk):
+        pk = _parse_uuid(pk, 'comment_id')
         comment = get_object_or_404(Comment, pk=pk)
         obj = Like.objects.filter(user=request.user, comment=comment).first()
         liked = False
@@ -920,7 +906,7 @@ class NotificationItemSerializer(serializers.Serializer):
     verb = serializers.CharField()
     read = serializers.BooleanField()
     created_at = serializers.DateTimeField()
-    actor = NotificationActorSerializer()
+    actor = NotificationActorSerializer(allow_null=True)
     video = serializers.DictField(required=False)
     comment = serializers.DictField(required=False)
 
@@ -959,47 +945,57 @@ class NotificationsListView(APIView):
         qs = qs.select_related('actor', 'video', 'comment').order_by('-created_at')
         rows = list(p.paginate_queryset(qs, request, view=self))
         out = []
-        for n in rows:
+
+        def safe_media_url(rel: str) -> str:
+            if not rel:
+                return ''
             try:
-                actor = getattr(n, 'actor', None)
-                a = None
-                if actor:
-                    # 统一获取展示名称
-                    name = getattr(actor, 'nickname', '') or getattr(actor, 'display_name', '') or getattr(actor, 'username', '') or ''
-                    a = {
-                        'id': str(actor.id),
-                        'username': getattr(actor, 'username', '') or '',
-                        'nickname': getattr(actor, 'nickname', '') or '',
-                        'display_name': name, # Web端主要依赖此字段
-                        'avatar_url': getattr(actor, 'profile_picture_thumb', '') or getattr(actor, 'profile_picture', '') or '',
-                    }
-                v = getattr(n, 'video', None)
-                vobj = None
-                if v:
-                    vobj = {
-                        'id': str(v.id),
-                        'title': v.title,
-                        'thumbnail_url': v.thumbnail_url if hasattr(v, 'thumbnail_url') else '',
-                    }
-                c = getattr(n, 'comment', None)
-                cobj = None
-                if c:
-                    cobj = {
-                        'id': str(c.id),
-                        'content': (c.content or '')[:120],
-                    }
-                out.append({
-                    'id': str(n.id),
-                    'type': n.verb,
-                    'verb': n.verb,
-                    'read': bool(n.read),
-                    'created_at': n.created_at,
-                    'actor': a,
-                    'video': vobj,
-                    'comment': cobj,
-                })
+                return _media_url(request, rel)
             except Exception:
-                continue
+                return ''
+
+        def build_actor_payload(actor):
+            if not actor:
+                return None
+            name = getattr(actor, 'nickname', '') or getattr(actor, 'display_name', '') or getattr(actor, 'username', '') or ''
+            avatar_rel = getattr(actor, 'profile_picture_thumb', '') or getattr(actor, 'profile_picture', '') or ''
+            return {
+                'id': str(actor.id),
+                'username': getattr(actor, 'username', '') or '',
+                'nickname': getattr(actor, 'nickname', '') or '',
+                'display_name': name,
+                'avatar_url': safe_media_url(avatar_rel),
+            }
+
+        def build_video_payload(video):
+            if not video:
+                return None
+            thumb_rel = getattr(getattr(video, 'thumbnail_f', None), 'name', None) or getattr(video, 'thumbnail', '') or ''
+            return {
+                'id': str(video.id),
+                'title': getattr(video, 'title', '') or '',
+                'thumbnail_url': safe_media_url(thumb_rel),
+            }
+
+        def build_comment_payload(comment):
+            if not comment:
+                return None
+            return {
+                'id': str(comment.id),
+                'content': (getattr(comment, 'content', '') or '')[:120],
+            }
+
+        for n in rows:
+            out.append({
+                'id': str(n.id),
+                'type': n.verb,
+                'verb': n.verb,
+                'read': bool(n.read),
+                'created_at': n.created_at,
+                'actor': build_actor_payload(getattr(n, 'actor', None)),
+                'video': build_video_payload(getattr(n, 'video', None)),
+                'comment': build_comment_payload(getattr(n, 'comment', None)),
+            })
         return Response({'results': out,
                          'page': p.page.number,
                          'page_size': p.get_page_size(request),
@@ -1010,8 +1006,7 @@ class NotificationsMarkReadView(APIView):
 
     def post(self, request):
         ids = request.data.get('ids') or []
-        if not isinstance(ids, list) or not ids:
-            raise ValidationError({'ids': '必须为非空数组'})
+        ids = _parse_uuid_list(ids, 'ids')
         qs = Notification.objects.filter(user=request.user, id__in=ids, read=False)
         updated = qs.update(read=True)
         return Response({'updated': int(updated)})
@@ -1071,6 +1066,7 @@ class ReportCreateView(APIView):
             raise ValidationError({'target_type': '非法值，可选: video, comment, user'})
         if not target_id:
             raise ValidationError({'target_id': '必填'})
+        target_id = _parse_uuid(target_id, 'target_id')
 
         # 验证目标对象存在
         if target_type == 'video':
@@ -1091,29 +1087,34 @@ class ReportCreateView(APIView):
             if str(target.id) == str(request.user.id):
                 raise PermissionDenied('不能举报自己')
 
-        # 检查是否已举报过同一目标
-        existing = Report.objects.filter(
-            reporter=request.user,
-            target_type=target_type,
-            target_id=target_id,
-            status='pending'
-        ).first()
-        if existing:
+        # 并发幂等：数据库唯一约束负责兜底，这里仍返回同一条 pending 举报
+        try:
+            report, created = Report.objects.get_or_create(
+                reporter=request.user,
+                target_type=target_type,
+                target_id=target_id,
+                status='pending',
+                defaults={
+                    'reason_code': reason_code or 'other',
+                    'description': description or None,
+                },
+            )
+        except IntegrityError:
+            report = Report.objects.filter(
+                reporter=request.user,
+                target_type=target_type,
+                target_id=target_id,
+                status='pending'
+            ).first()
+            if report is None:
+                raise ValidationError({'detail': '举报提交失败，请重试'})
+            created = False
+        if not created:
             return Response({
-                'report_id': str(existing.id),
-                'status': existing.status,
+                'report_id': str(report.id),
+                'status': report.status,
                 'message': '您已举报过该内容，正在等待处理'
             }, status=status.HTTP_200_OK)
-
-        # 创建举报记录
-        report = Report.objects.create(
-            reporter=request.user,
-            target_type=target_type,
-            target_id=target_id,
-            reason_code=reason_code or 'other',
-            description=description or None,
-            status='pending'
-        )
 
         return Response({
             'report_id': str(report.id),

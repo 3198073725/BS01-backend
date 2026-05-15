@@ -348,6 +348,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'no-reply@example.com')
+CONTACT_EMAIL_TO = os.getenv('CONTACT_EMAIL_TO', '')
 SITE_URL = os.getenv('SITE_URL', 'http://localhost:8000')
 # SMTP 相关配置（当 EMAIL_BACKEND 使用 SMTP 时生效）
 EMAIL_HOST = os.getenv('EMAIL_HOST', 'localhost')

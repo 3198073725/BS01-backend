@@ -121,7 +121,7 @@ class ContactSubmitView(APIView):
     """接收前端联系表单并转发到管理员邮箱。
 
     - 请求体：{ type, name, email, subject, message }
-    - 收件人：settings.CONTACT_EMAIL_TO（若未配置则使用 mediacms@126.com）
+    - 收件人：settings.CONTACT_EMAIL_TO（必须显式配置）
     - 频率限制：contact_submit
     - 鉴权：允许匿名提交
     """
@@ -309,8 +309,9 @@ class EmailVerificationRequestView(APIView):
         text = f"{subject}:\n{link}"
         try:
             send_mail(subject, text, settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False, html_message=html)
-        except Exception as e:
+        except Exception:
             logger.exception("Send verify email failed for user=%s email=%s", user.id, user.email)
+            raise ValidationError({'detail': '验证邮件发送失败，请稍后再试'})
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -887,6 +888,7 @@ class LoginSendCodeView(APIView):
                 send_mail(subject, text_body or text, settings.DEFAULT_FROM_EMAIL, [email], fail_silently=False)
         except Exception:
             logger.exception("send_login_code_failed email=%s", email)
+            raise ValidationError({'detail': '验证码发送失败，请稍后再试'})
         # 写入冷却与计数
         cache.set(last_key, int(time.time()), timeout=min_interval)
         cache.set(email_cnt_key, email_cnt + 1, timeout=ttl_day)
@@ -1093,6 +1095,8 @@ class QrLoginConfirmView(APIView):
         data = cache.get(f"qr_login:{session}")
         if not data:
             raise ValidationError({'detail': '会话不存在或已过期'})
+        if data.get('status') == 'confirmed':
+            raise ValidationError({'detail': '会话已确认，不能重复使用'})
         
         user: User = request.user
         refresh = RefreshToken.for_user(user)
