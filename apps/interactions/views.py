@@ -23,6 +23,7 @@ from apps.users.serializers import UserPublicSerializer, UserFollowListSerialize
 from apps.videos.models import Video, WatchLater
 from django.conf import settings
 from backend.common.pagination import StandardResultsSetPagination
+from apps.configs.utils import get_system_setting
 
 
 def _parse_uuid(value, field_name: str) -> str:
@@ -233,9 +234,9 @@ class FollowingListView(generics.ListAPIView):
 def _media_url(request, rel: str) -> str:
     # 优先使用请求 Host，避免 SITE_URL 与前端 Host 不一致导致跨域或 127.0.0.1 无法访问
     try:
-        base = (request.build_absolute_uri('/') if request else (getattr(settings, 'SITE_URL', '') or '')).rstrip('/')
+        base = (request.build_absolute_uri('/') if request else (get_system_setting('SITE_URL', '') or '')).rstrip('/')
     except Exception:
-        base = (getattr(settings, 'SITE_URL', '') or '').rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or '').rstrip('/')
     media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
     if media.startswith('http://') or media.startswith('https://'):
         return f"{media}/{rel}"
@@ -723,7 +724,7 @@ class CommentSerializer(serializers.ModelSerializer):
                     avatar = s
                 elif s.startswith('/'):
                     try:
-                        base = (getattr(settings, 'SITE_URL', '') or (req.build_absolute_uri('/') if req else '')).rstrip('/')
+                        base = (get_system_setting('SITE_URL', '') or (req.build_absolute_uri('/') if req else '')).rstrip('/')
                     except Exception:
                         base = ''
                     avatar = f"{base}{s}" if base else s

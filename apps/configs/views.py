@@ -7,6 +7,8 @@ import time
 import os
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
+from apps.adminapi.permissions import IsAdmin
+from apps.configs.utils import invalidate_config_cache
 
 # 加载 .env 文件（如果存在）
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -78,10 +80,12 @@ SYSTEM_CONFIG_SCHEMA = {
             'REGISTRATION_REQUIRE_CAPTCHA': {'type': 'bool', 'label': '注册需验证码', 'default': False, 'help': '开启后注册需要验证码'},
             'EMAIL_VERIFY_TOKEN_MAX_AGE': {'type': 'int', 'label': '邮箱验证有效期(秒)', 'default': 86400, 'help': '默认24小时'},
             'PASSWORD_RESET_TOKEN_MAX_AGE': {'type': 'int', 'label': '密码重置有效期(秒)', 'default': 3600, 'help': '默认1小时'},
+            'EMAIL_CHANGE_TOKEN_MAX_AGE': {'type': 'int', 'label': '邮箱改绑确认有效期(秒)', 'default': 86400, 'help': '默认24小时'},
             'EMAIL_CHECK_MX': {'type': 'bool', 'label': '检查邮箱MX记录', 'default': False, 'help': '验证邮箱域名是否有效'},
             'AVATAR_MAX_SIZE_BYTES': {'type': 'int', 'label': '头像最大大小(字节)', 'default': 2097152, 'help': '默认2MB'},
             'AVATAR_MAX_PIXELS': {'type': 'int', 'label': '头像最大像素', 'default': 25000000, 'help': '默认25MP'},
             'VIDEO_MAX_SIZE_BYTES': {'type': 'int', 'label': '视频最大大小(字节)', 'default': 524288000, 'help': '默认500MB'},
+            'CHUNK_SIZE_BYTES': {'type': 'int', 'label': '分片上传大小(字节)', 'default': 5242880, 'help': '默认5MB'},
             'REFRESH_TOKEN_LIFETIME_DAYS': {'type': 'int', 'label': '刷新令牌有效期(天)', 'default': 60, 'help': 'JWT刷新令牌过期时间'},
         }
     },
@@ -106,9 +110,25 @@ SYSTEM_CONFIG_SCHEMA = {
             'LOGIN_CODE_MIN_INTERVAL_SECONDS': {'type': 'int', 'label': '验证码最小间隔(秒)', 'default': 60, 'help': '发送验证码间隔'},
             'LOGIN_CODE_DAILY_LIMIT_EMAIL': {'type': 'int', 'label': '单邮箱日限', 'default': 20, 'help': '同一邮箱每天最多'},
             'LOGIN_CODE_DAILY_LIMIT_IP': {'type': 'int', 'label': '单IP日限', 'default': 200, 'help': '同一IP每天最多'},
+            'LOGIN_CODE_LOGIN_FAIL_WINDOW_SECONDS': {'type': 'int', 'label': '验证码登录失败统计窗口(秒)', 'default': 600, 'help': '默认10分钟'},
+            'LOGIN_CODE_LOGIN_FAIL_MAX_TRIES_EMAIL': {'type': 'int', 'label': '验证码登录单邮箱失败上限', 'default': 5, 'help': '超过后进入冷却'},
+            'LOGIN_CODE_LOGIN_FAIL_MAX_TRIES_IP': {'type': 'int', 'label': '验证码登录单IP失败上限', 'default': 50, 'help': '超过后进入冷却'},
+            'LOGIN_CODE_LOGIN_FAIL_COOLDOWN_SECONDS': {'type': 'int', 'label': '验证码登录冷却时间(秒)', 'default': 300, 'help': '默认5分钟'},
+            'USERNAME_CHANGE_COOLDOWN_DAYS': {'type': 'int', 'label': '改名冷却天数', 'default': 30, 'help': '两次修改用户名之间的最短间隔'},
+            'LOGIN_PASSWORD_FAIL_WINDOW_SECONDS': {'type': 'int', 'label': '密码登录失败统计窗口(秒)', 'default': 600, 'help': '默认10分钟'},
             'LOGIN_PASSWORD_FAIL_MAX_TRIES_USERNAME': {'type': 'int', 'label': '用户名错误次数', 'default': 5, 'help': '密码错误锁定'},
             'LOGIN_PASSWORD_FAIL_MAX_TRIES_IP': {'type': 'int', 'label': 'IP错误次数', 'default': 50, 'help': ''},
             'LOGIN_PASSWORD_FAIL_COOLDOWN_SECONDS': {'type': 'int', 'label': '锁定时间(秒)', 'default': 300, 'help': '默认5分钟'},
+            'POPUP_STATS_CACHE_SECONDS': {'type': 'int', 'label': '个人弹窗统计缓存(秒)', 'default': 120, 'help': '默认2分钟'},
+        }
+    },
+    'media': {
+        'label': '媒体限制',
+        'settings': {
+            'THUMBNAIL_MAX_SIZE_BYTES': {'type': 'int', 'label': '封面最大大小(字节)', 'default': 5242880, 'help': '默认5MB'},
+            'THUMBNAIL_MIN_WIDTH': {'type': 'int', 'label': '封面最小宽度(像素)', 'default': 480, 'help': '默认480'},
+            'THUMBNAIL_MIN_HEIGHT': {'type': 'int', 'label': '封面最小高度(像素)', 'default': 270, 'help': '默认270'},
+            'THUMBNAIL_RATIO_TOL': {'type': 'string', 'label': '封面比例容差', 'default': '0.04', 'help': '与16:9比例允许的偏差，例如0.04'},
         }
     },
     # 邮件设置
@@ -152,6 +172,20 @@ SYSTEM_CONFIG_SCHEMA = {
     },
 }
 
+ADMIN_OVERRIDE_KEYS = {'SITE_URL', 'FRONTEND_URL'}
+
+
+def iter_system_schema_settings():
+    for category, data in SYSTEM_CONFIG_SCHEMA.items():
+        for key, meta in data['settings'].items():
+            yield category, key, meta
+
+
+def get_admin_writable(key: str, env_value):
+    if key in ADMIN_OVERRIDE_KEYS:
+        return True
+    return env_value is None
+
 class GlobalConfigView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -159,20 +193,24 @@ class GlobalConfigView(APIView):
         # 获取全局配置命名空间
         ns, _ = ConfigNamespace.objects.get_or_create(name='system', defaults={'description': 'System Global Settings'})
         
-        # 获取所有系统配置键
         keys = ConfigKey.objects.filter(namespace=ns)
-        
-        # 获取全局配置项 (content_type=None)
-        entries = ConfigEntry.objects.filter(key__in=keys, content_type__isnull=True)
-        
+        key_defaults = {item.key: item.default_value for item in keys}
+        entries = ConfigEntry.objects.filter(key__in=keys, content_type__isnull=True, object_id__isnull=True, is_active=True)
+        db_values = {entry.key.key: entry.value for entry in entries}
+
         config_data = {}
-        for entry in entries:
-            config_data[entry.key.key] = entry.value
-            
-        # 补充默认值
-        for key in keys:
-            if key.key not in config_data:
-                config_data[key.key] = key.default_value
+        for _, key, meta in iter_system_schema_settings():
+            env_value = get_env_value(key, None)
+            if key in ADMIN_OVERRIDE_KEYS and key in db_values:
+                config_data[key] = db_values[key]
+            elif env_value is not None:
+                config_data[key] = env_value
+            elif key in db_values:
+                config_data[key] = db_values[key]
+            elif key in key_defaults and key_defaults[key] is not None:
+                config_data[key] = key_defaults[key]
+            else:
+                config_data[key] = meta['default']
 
         # 版本号用于强制客户端刷新缓存/重启逻辑
         if 'config_version' not in config_data:
@@ -183,7 +221,7 @@ class GlobalConfigView(APIView):
 
 class AdminConfigListView(APIView):
     """获取所有系统配置项的定义和当前值（优先从 .env 读取）"""
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    permission_classes = [IsAdmin]
 
     def get(self, request):
         ns, _ = ConfigNamespace.objects.get_or_create(name='system')
@@ -201,9 +239,15 @@ class AdminConfigListView(APIView):
                 'settings': {}
             }
             for key, meta in data['settings'].items():
-                # 优先级：1. .env 环境变量  2. 数据库保存的值  3. settings.py 默认值
+                # 大多数配置优先级：.env > 数据库 > 默认值
+                # 但地址类配置允许管理端覆盖，以数据库值优先。
                 env_value = get_env_value(key, None)
-                if env_value is not None:
+                prefer_db = key in ADMIN_OVERRIDE_KEYS
+                writable = get_admin_writable(key, env_value)
+                if prefer_db and key in db_values:
+                    final_value = db_values[key]
+                    source = 'db'
+                elif env_value is not None:
                     final_value = env_value
                     source = 'env'
                 elif key in db_values:
@@ -216,14 +260,15 @@ class AdminConfigListView(APIView):
                 result[category]['settings'][key] = {
                     **meta,
                     'value': final_value,
-                    '_source': source  # 调试信息，前端可忽略
+                    '_source': source,  # 调试信息，前端可忽略
+                    '_writable': writable,
                 }
         
         return Response(result)
 
 
 class AdminConfigUpdateView(APIView):
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    permission_classes = [IsAdmin]
 
     def post(self, request):
         data = request.data
@@ -231,6 +276,9 @@ class AdminConfigUpdateView(APIView):
         
         updated_keys = []
         for k, v in data.items():
+            env_value = get_env_value(k, None)
+            if not get_admin_writable(k, env_value):
+                continue
             # 自动创建 Key
             key_obj, created = ConfigKey.objects.get_or_create(
                 namespace=ns, 
@@ -253,5 +301,6 @@ class AdminConfigUpdateView(APIView):
             content_type__isnull=True,
             defaults={'value': int(time.time())}
         )
+        invalidate_config_cache('system')
 
         return Response({'status': 'ok', 'updated': updated_keys, 'version': int(time.time())})

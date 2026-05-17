@@ -19,11 +19,16 @@ dist/
 *.log
 local_settings.py
 db.sqlite3
+celerybeat-schedule
 
 # Media / Static
 media/
 static/
 staticfiles/
+test_media/
+test_media_access_control/
+test_media_content_types/
+test_media_upload_limits/
 
 # Unit test / type check
 .pytest_cache/

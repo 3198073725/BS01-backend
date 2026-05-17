@@ -49,8 +49,15 @@ from .serializers import (
     PasswordChangeSerializer,
 )
 from .tokens import email_verification_token
+from apps.configs.utils import get_system_setting
 
 logger = logging.getLogger(__name__)
+def _apply_refresh_lifetime(refresh: RefreshToken) -> RefreshToken:
+    days = int(get_system_setting('REFRESH_TOKEN_LIFETIME_DAYS', 60) or 60)
+    refresh.set_exp(lifetime=timedelta(days=max(1, days)))
+    return refresh
+
+
 # 在此编写视图，例如：
 # from rest_framework.views import APIView
 # class ProfileView(APIView):
@@ -68,6 +75,8 @@ class RegisterView(APIView):
     throttle_scope = 'register'
 
     def post(self, request):
+        if not bool(get_system_setting('allow_register', True)):
+            raise ValidationError({'detail': '当前已关闭新用户注册'})
         serializer = RegisterSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
@@ -157,7 +166,7 @@ class ContactSubmitView(APIView):
             raise ValidationError({'email': '邮箱格式不正确'})
 
         # 组织邮件
-        site = getattr(settings, 'SITE_URL', '')
+        site = get_system_setting('SITE_URL', '')
         prefix = getattr(settings, 'EMAIL_SUBJECT_PREFIX', '').strip()
         tag = f"[Contact]" if not ctype else f"[Contact][{ctype}]"
         final_subject = f"{prefix}{tag} {subject}".strip()
@@ -295,7 +304,7 @@ class EmailVerificationRequestView(APIView):
         if user.is_verified:
             return Response({'detail': '已认证，无需重复验证'}, status=status.HTTP_200_OK)
         token = email_verification_token.make_token(user)
-        link = f"{settings.SITE_URL}/api/users/verify-email/confirm/?uid={user.id}&token={token}"
+        link = f"{get_system_setting('SITE_URL', '')}/api/users/verify-email/confirm/?uid={user.id}&token={token}"
         # 选择语言（简单按 Accept-Language 判断），默认中文
         lang = 'en' if str(request.headers.get('Accept-Language', '')).lower().startswith('en') else 'zh'
         subject = 'Verify your email' if lang == 'en' else '邮箱验证'
@@ -347,12 +356,14 @@ class PasswordResetRequestView(APIView):
                 from django.contrib.auth.tokens import default_token_generator
                 token = default_token_generator.make_token(user)
                 # 优先跳转前端页面；未配置则回退到后端确认页
-                if getattr(settings, 'FRONTEND_URL', ''):
+                frontend_url = get_system_setting('FRONTEND_URL', '')
+                site_url = get_system_setting('SITE_URL', '')
+                if frontend_url:
                     path = getattr(settings, 'PASSWORD_RESET_FRONTEND_PATH', '/#/reset-password')
-                    base = settings.FRONTEND_URL.rstrip('/')
+                    base = frontend_url.rstrip('/')
                     link = f"{base}{path}?uid={user.id}&token={token}"
                 else:
-                    link = f"{settings.SITE_URL}/api/users/password-reset/confirm/?uid={user.id}&token={token}"
+                    link = f"{site_url}/api/users/password-reset/confirm/?uid={user.id}&token={token}"
                 # 选择语言
                 lang = 'en' if str(request.headers.get('Accept-Language', '')).lower().startswith('en') else 'zh'
                 subject = 'Reset your password' if lang == 'en' else '重置密码'
@@ -485,7 +496,7 @@ class UsernameChangeView(APIView):
         if new_username.lower() == user.username.lower():
             return Response({'username': user.username})
         try:
-            cooldown_days = int(os.getenv('USERNAME_CHANGE_COOLDOWN_DAYS', '30'))
+            cooldown_days = int(get_system_setting('USERNAME_CHANGE_COOLDOWN_DAYS', 30))
         except Exception:
             cooldown_days = 30
         cooldown_sec = max(0, cooldown_days * 24 * 3600)
@@ -529,7 +540,7 @@ class EmailChangeRequestView(APIView):
             deny = {d.lower() for d in (settings.EMAIL_DOMAIN_BLACKLIST or [])} | {d.lower() for d in (settings.DISPOSABLE_DOMAINS or [])}
             if domain in deny:
                 raise ValidationError({'new_email': '该邮箱域名不被允许'})
-            if settings.EMAIL_CHECK_MX:
+            if bool(get_system_setting('EMAIL_CHECK_MX', getattr(settings, 'EMAIL_CHECK_MX', False))):
                 try:
                     import dns.resolver  # type: ignore
                     try:
@@ -542,15 +553,17 @@ class EmailChangeRequestView(APIView):
             raise ValidationError({'new_email': '该邮箱已被占用'})
         token = secrets.token_urlsafe(24)
         try:
-            max_age = int(os.getenv('EMAIL_CHANGE_TOKEN_MAX_AGE', '86400'))
+            max_age = int(get_system_setting('EMAIL_CHANGE_TOKEN_MAX_AGE', 86400))
         except Exception:
             max_age = 86400
         cache.set(f"email_change:{token}", {'uid': str(user.id), 'email': new_email.lower()}, timeout=max_age)
-        if getattr(settings, 'FRONTEND_URL', ''):
-            base = settings.FRONTEND_URL.rstrip('/')
+        frontend_url = get_system_setting('FRONTEND_URL', '')
+        site_url = get_system_setting('SITE_URL', '')
+        if frontend_url:
+            base = frontend_url.rstrip('/')
             link = f"{base}/#/email-change-confirm?token={token}"
         else:
-            link = f"{settings.SITE_URL}/api/users/email/change/confirm/?token={token}"
+            link = f"{site_url}/api/users/email/change/confirm/?token={token}"
         subject = '[BS01] 邮箱改绑确认'
         text = f"您正在将账户邮箱更改为：{new_email}。点击链接确认：{link}（24小时内有效）。如非本人操作请忽略。"
         try:
@@ -595,7 +608,7 @@ class UserPopupStatsView(APIView):
     - likes_count, favorites_count, history_count, watch_later_count, my_works_count
 
     支持 query: force=1 强制刷新，默认使用短缓存。
-    缓存时长由环境变量 POPUP_STATS_CACHE_SECONDS 控制，默认 120 秒。
+    缓存时长由动态配置 `POPUP_STATS_CACHE_SECONDS` 控制，默认 120 秒。
     """
     def get(self, request):
         try:
@@ -627,7 +640,7 @@ class UserPopupStatsView(APIView):
             }
             return Response(data)
         try:
-            ttl = int(os.getenv('POPUP_STATS_CACHE_SECONDS', '120'))
+            ttl = int(get_system_setting('POPUP_STATS_CACHE_SECONDS', 120))
         except Exception:
             ttl = 120
         force = str(request.query_params.get('force', '')).lower() in ('1', 'true', 'yes')
@@ -710,7 +723,8 @@ class AvatarUploadView(APIView):
         file = request.FILES.get('file') or request.FILES.get('avatar')
         if not file:
             raise ValidationError({'file': '未收到文件'})
-        if file.size > settings.AVATAR_MAX_SIZE_BYTES:
+        max_avatar_bytes = int(get_system_setting('AVATAR_MAX_SIZE_BYTES', getattr(settings, 'AVATAR_MAX_SIZE_BYTES', 2 * 1024 * 1024)))
+        if file.size > max_avatar_bytes:
             raise ValidationError({'file': '文件过大'})
         content_type = file.content_type or mimetypes.guess_type(file.name)[0] or ''
         allowed_types = {'image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png'}
@@ -723,7 +737,7 @@ class AvatarUploadView(APIView):
             raise ValidationError({'file': '非法图片文件'})
         mw, mh = img.size
         # 像素安全上限（防止恶意超大图片导致内存占用）
-        max_pixels = int(getattr(settings, 'AVATAR_MAX_PIXELS', 25000000))  # 25MP 默认
+        max_pixels = int(get_system_setting('AVATAR_MAX_PIXELS', getattr(settings, 'AVATAR_MAX_PIXELS', 25000000)))
         if mw * mh > max_pixels:
             raise ValidationError({'file': '图片像素过大'})
         # 对非常规模式进行标准化（保留 alpha 的 PNG 在保存 PNG 时不受影响）
@@ -815,7 +829,7 @@ class LoginSendCodeView(APIView):
             if domain in deny:
                 raise ValidationError({'email': '该邮箱域名不被允许'})
             # 可选 MX 检查
-            if settings.EMAIL_CHECK_MX:
+            if bool(get_system_setting('EMAIL_CHECK_MX', getattr(settings, 'EMAIL_CHECK_MX', False))):
                 try:
                     import dns.resolver  # type: ignore
                     try:
@@ -832,9 +846,9 @@ class LoginSendCodeView(APIView):
             ip = 'unknown'
         now = timezone.now()
         today = now.strftime('%Y%m%d')
-        min_interval = int(getattr(settings, 'LOGIN_CODE_MIN_INTERVAL_SECONDS', 60))
-        max_email_daily = int(getattr(settings, 'LOGIN_CODE_DAILY_LIMIT_EMAIL', 20))
-        max_ip_daily = int(getattr(settings, 'LOGIN_CODE_DAILY_LIMIT_IP', 200))
+        min_interval = int(get_system_setting('LOGIN_CODE_MIN_INTERVAL_SECONDS', getattr(settings, 'LOGIN_CODE_MIN_INTERVAL_SECONDS', 60)))
+        max_email_daily = int(get_system_setting('LOGIN_CODE_DAILY_LIMIT_EMAIL', getattr(settings, 'LOGIN_CODE_DAILY_LIMIT_EMAIL', 20)))
+        max_ip_daily = int(get_system_setting('LOGIN_CODE_DAILY_LIMIT_IP', getattr(settings, 'LOGIN_CODE_DAILY_LIMIT_IP', 200)))
         # 上次发送时间（按邮箱）
         last_key = f"login_code:last_email:{email.lower()}"
         last_ts = cache.get(last_key)
@@ -875,7 +889,7 @@ class LoginSendCodeView(APIView):
         subject = '登录验证码'
         text = f"您的登录验证码是：{code}（5分钟内有效）。如非本人操作请忽略。"
         try:
-            context = {'code': code, 'minutes': 5, 'site_url': settings.SITE_URL, 'email': email}
+            context = {'code': code, 'minutes': 5, 'site_url': get_system_setting('SITE_URL', ''), 'email': email}
             try:
                 html_body = render_to_string('emails/login_code.html', context)
             except TemplateDoesNotExist:
@@ -929,10 +943,10 @@ class LoginWithCodeView(APIView):
         except Exception:
             ip = 'unknown'
         email_l = email.lower()
-        window_sec = int(getattr(settings, 'LOGIN_CODE_LOGIN_FAIL_WINDOW_SECONDS', 600))
-        max_email = int(getattr(settings, 'LOGIN_CODE_LOGIN_FAIL_MAX_TRIES_EMAIL', 5))
-        max_ip = int(getattr(settings, 'LOGIN_CODE_LOGIN_FAIL_MAX_TRIES_IP', 50))
-        cooldown = int(getattr(settings, 'LOGIN_CODE_LOGIN_FAIL_COOLDOWN_SECONDS', 300))
+        window_sec = int(get_system_setting('LOGIN_CODE_LOGIN_FAIL_WINDOW_SECONDS', getattr(settings, 'LOGIN_CODE_LOGIN_FAIL_WINDOW_SECONDS', 600)))
+        max_email = int(get_system_setting('LOGIN_CODE_LOGIN_FAIL_MAX_TRIES_EMAIL', getattr(settings, 'LOGIN_CODE_LOGIN_FAIL_MAX_TRIES_EMAIL', 5)))
+        max_ip = int(get_system_setting('LOGIN_CODE_LOGIN_FAIL_MAX_TRIES_IP', getattr(settings, 'LOGIN_CODE_LOGIN_FAIL_MAX_TRIES_IP', 50)))
+        cooldown = int(get_system_setting('LOGIN_CODE_LOGIN_FAIL_COOLDOWN_SECONDS', getattr(settings, 'LOGIN_CODE_LOGIN_FAIL_COOLDOWN_SECONDS', 300)))
 
         lock_e_key = f"code_login:lock_email:{email_l}"
         lock_ip_key = f"code_login:lock_ip:{ip}"
@@ -1014,7 +1028,7 @@ class LoginWithCodeView(APIView):
         # 成功：清空失败计数并发放 JWT
         cache.delete(f"code_login:fail_email:{email_l}")
         cache.delete(f"code_login:fail_ip:{ip}")
-        refresh = RefreshToken.for_user(user)
+        refresh = _apply_refresh_lifetime(RefreshToken.for_user(user))
         return Response({'access': str(refresh.access_token), 'refresh': str(refresh)})
 
 
@@ -1035,7 +1049,7 @@ class QrLoginCreateView(APIView):
         ua = (request.META.get('HTTP_USER_AGENT') or '')[:200]
         cache.set(f"qr_login:{session}", {'status': 'pending', 'ip': ip, 'ua': ua}, timeout=300)
         # 二维码内容为确认链接（移动端打开后请求确认接口）
-        confirm_url = f"{settings.SITE_URL}/api/users/login/qr/confirm/?session={session}"
+        confirm_url = f"{get_system_setting('SITE_URL', '')}/api/users/login/qr/confirm/?session={session}"
         # 优先在后端生成二维码图片（base64 data URI）；若缺少依赖则回退到占位服务
         try:
             import qrcode  # 可选依赖
@@ -1103,7 +1117,7 @@ class QrLoginConfirmView(APIView):
             raise ValidationError({'detail': '会话已确认，不能重复使用'})
         
         user: User = request.user
-        refresh = RefreshToken.for_user(user)
+        refresh = _apply_refresh_lifetime(RefreshToken.for_user(user))
         
         # 写入确认状态和令牌
         cache.set(f"qr_login:{session}", {
@@ -1134,10 +1148,10 @@ class TokenObtainPairViewWithCooldown(TokenObtainPairView):
         except Exception:
             ip = 'unknown'
 
-        window_sec = int(getattr(settings, 'LOGIN_PASSWORD_FAIL_WINDOW_SECONDS', 600))
-        max_u = int(getattr(settings, 'LOGIN_PASSWORD_FAIL_MAX_TRIES_USERNAME', 5))
-        max_ip = int(getattr(settings, 'LOGIN_PASSWORD_FAIL_MAX_TRIES_IP', 50))
-        cooldown = int(getattr(settings, 'LOGIN_PASSWORD_FAIL_COOLDOWN_SECONDS', 300))
+        window_sec = int(get_system_setting('LOGIN_PASSWORD_FAIL_WINDOW_SECONDS', getattr(settings, 'LOGIN_PASSWORD_FAIL_WINDOW_SECONDS', 600)))
+        max_u = int(get_system_setting('LOGIN_PASSWORD_FAIL_MAX_TRIES_USERNAME', getattr(settings, 'LOGIN_PASSWORD_FAIL_MAX_TRIES_USERNAME', 5)))
+        max_ip = int(get_system_setting('LOGIN_PASSWORD_FAIL_MAX_TRIES_IP', getattr(settings, 'LOGIN_PASSWORD_FAIL_MAX_TRIES_IP', 50)))
+        cooldown = int(get_system_setting('LOGIN_PASSWORD_FAIL_COOLDOWN_SECONDS', getattr(settings, 'LOGIN_PASSWORD_FAIL_COOLDOWN_SECONDS', 300)))
 
         u_lock_key = f"login_pwd:lock_u:{uname.lower()}"
         ip_lock_key = f"login_pwd:lock_ip:{ip}"
@@ -1171,6 +1185,11 @@ class TokenObtainPairViewWithCooldown(TokenObtainPairView):
             raise e
 
         data = serializer.validated_data
+        user = getattr(serializer, 'user', None)
+        if user is not None:
+            refresh = _apply_refresh_lifetime(RefreshToken.for_user(user))
+            data['refresh'] = str(refresh)
+            data['access'] = str(refresh.access_token)
         self._clear_failure(uname, ip)
         return Response(data, status=status.HTTP_200_OK)
 

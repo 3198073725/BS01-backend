@@ -1,6 +1,7 @@
 from __future__ import annotations
 import threading
 from typing import Any, Optional
+from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 from .models import ConfigNamespace, ConfigKey, ConfigEntry
@@ -94,6 +95,11 @@ def invalidate_config_cache(namespace: Optional[str] = None):
             for k in list(_cache.keys()):
                 if k[0] == namespace:
                     _cache.pop(k, None)
+
+
+def get_system_setting(key: str, default=None):
+    fallback = getattr(settings, key, default)
+    return get_config('system', key, default=fallback)
 
 
 @transaction.atomic

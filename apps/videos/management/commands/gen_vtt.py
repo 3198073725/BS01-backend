@@ -2,6 +2,7 @@ import os
 import math
 from django.core.management.base import BaseCommand
 from django.conf import settings
+from apps.configs.utils import get_system_setting
 from apps.videos.models import Video
 from apps.videos.views import _make_vtt_thumbnails
 
@@ -21,7 +22,7 @@ class Command(BaseCommand):
         force = bool(options.get('force'))
         order = str(options.get('order') or '-created_at')
 
-        base = (getattr(settings, 'SITE_URL', '') or 'http://localhost:8000').rstrip('/')
+        base = (get_system_setting('SITE_URL', 'http://localhost:8000') or 'http://localhost:8000').rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         media_root = getattr(settings, 'MEDIA_ROOT', '')
         if not media_root:

@@ -14,6 +14,7 @@ from rest_framework import permissions
 from apps.videos.models import Video
 from apps.interactions.models import Like, Favorite, Follow
 from django.db.models import Count, Q
+from apps.configs.utils import get_system_setting
 
 # 在此编写视图，例如：
 # from rest_framework.views import APIView
@@ -74,7 +75,7 @@ class RecommendationFeedView(APIView):
             size = 10
         size = min(50, max(1, size))
 
-        base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
 
         uid = 'anon'
@@ -194,7 +195,7 @@ class FollowingFeedView(APIView):
             size = 10
         size = min(50, max(1, size))
 
-        base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
 
         followed_ids = list(Follow.objects.filter(follower=request.user).values_list('followed_id', flat=True))
@@ -298,7 +299,7 @@ class FeaturedFeedView(APIView):
             size = 10
         size = min(50, max(1, size))
 
-        base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
 
         def url_of(rel: str) -> str:

@@ -11,6 +11,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.videos.models import Video
+from apps.configs.utils import get_system_setting
 
 
 def _format_ts(seconds: float) -> str:
@@ -92,7 +93,7 @@ def _probe_video(file_path: str) -> tuple[int, int, int]:
 
 @shared_task(bind=True, name='tasks.generate_vtt_and_thumbnail')
 def generate_vtt_and_thumbnail(self, video_id: str) -> dict:
-    base = (getattr(settings, 'SITE_URL', '') or '').rstrip('/')
+    base = (get_system_setting('SITE_URL', '') or '').rstrip('/')
     media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
     try:
         v = Video.objects.get(pk=video_id)
@@ -201,7 +202,7 @@ def generate_vtt_and_thumbnail(self, video_id: str) -> dict:
 
 @shared_task(bind=True, name='tasks.transcode_video_to_hls')
 def transcode_video_to_hls(self, video_id: str) -> dict:
-    base = (getattr(settings, 'SITE_URL', '') or '').rstrip('/')
+    base = (get_system_setting('SITE_URL', '') or '').rstrip('/')
     media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
     try:
         v = Video.objects.get(pk=video_id)

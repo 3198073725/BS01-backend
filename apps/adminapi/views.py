@@ -21,7 +21,26 @@ from apps.videos.models import Video, VideoTag
 from apps.interactions.models import Comment, History, Like
 from apps.content.models import AuditLog, Category, Tag
 from apps.notifications.models import SystemAnnouncement
+from apps.configs.utils import get_system_setting
 from .permissions import IsReviewer, IsModerator, IsAdmin, IsSuperAdmin, CanHandleReport
+
+
+def _refresh_lifetime_seconds() -> int:
+    try:
+        days = int(get_system_setting('REFRESH_TOKEN_LIFETIME_DAYS', 60) or 60)
+        return max(1, days) * 24 * 3600
+    except Exception:
+        td = settings.SIMPLE_JWT.get('REFRESH_TOKEN_LIFETIME')
+        return int(getattr(td, 'total_seconds')()) if td else 3600
+
+
+def _apply_refresh_lifetime(refresh):
+    try:
+        days = int(get_system_setting('REFRESH_TOKEN_LIFETIME_DAYS', 60) or 60)
+        refresh.set_exp(lifetime=timezone.timedelta(days=max(1, days)))
+    except Exception:
+        pass
+    return refresh
 
 
 def _parse_bool(v) -> bool | None:
@@ -55,9 +74,25 @@ def _report_target_allowed_actions(target_type: str) -> set[str]:
     mapping = {
         'video': {'dismiss', 'warn', 'delete_content', 'escalate'},
         'comment': {'dismiss', 'warn', 'delete_content', 'escalate'},
-        'user': {'dismiss', 'warn', 'ban_user', 'ban_temp', 'escalate'},
+        'user': {'dismiss', 'warn', 'ban_user', 'escalate'},
     }
     return mapping.get(str(target_type or '').strip().lower(), set())
+
+
+def _can_handle_escalated_report(user, report) -> bool:
+    role = getattr(user, 'admin_role', 'none')
+    if report.target_type == 'user':
+        return role in {'admin', 'super_admin'}
+    return role in {'moderator', 'admin', 'super_admin'}
+
+
+def _can_escalate_report(user, report) -> bool:
+    role = getattr(user, 'admin_role', 'none')
+    if role == 'reviewer':
+        return True
+    if role == 'moderator':
+        return report.target_type == 'user'
+    return False
 
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from apps.users.serializers import UserMeSerializer, UserFollowListSerializer
@@ -125,6 +160,11 @@ class AdminUsersListView(APIView):
 class AdminUserDetailView(APIView):
     permission_classes = [IsReviewer]
 
+    def get_permissions(self):
+        if self.request.method == 'PATCH':
+            return [IsAdmin()]
+        return [IsReviewer()]
+
     def get(self, request, pk):
         u = get_object_or_404(User, pk=pk)
         data = {
@@ -171,7 +211,7 @@ class AdminUserDetailView(APIView):
             updates['is_creator'] = bool(vv)
         if 'is_staff' in body:
             # 仅超级管理员可调整 is_staff
-            if not getattr(request.user, 'is_superuser', False):
+            if getattr(request.user, 'admin_role', 'none') != 'super_admin':
                 raise PermissionDenied('仅超级管理员可修改 is_staff')
             v = body.get('is_staff')
             vv = v if isinstance(v, bool) else _parse_bool(v)
@@ -180,7 +220,7 @@ class AdminUserDetailView(APIView):
             updates['is_staff'] = bool(vv)
         if 'admin_role' in body:
             # 仅超级管理员可调整 admin_role
-            if not getattr(request.user, 'is_superuser', False):
+            if getattr(request.user, 'admin_role', 'none') != 'super_admin':
                 raise PermissionDenied('仅超级管理员可修改管理员角色')
             role = str(body.get('admin_role') or '').strip()
             valid_roles = ['none', 'reviewer', 'moderator', 'admin', 'super_admin']
@@ -209,7 +249,7 @@ class AdminVideosListView(APIView):
     def get(self, request):
         qs = Video.objects.all().select_related('user', 'category').prefetch_related('video_tags__tag')
         # base/media for URL building
-        base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         def url_of(rel: str) -> str:
             if media.startswith('http://') or media.startswith('https://'):
@@ -310,6 +350,24 @@ class AdminVideosListView(APIView):
 class AdminVideoDetailView(APIView):
     permission_classes = [IsReviewer]
 
+    def get_permissions(self):
+        if self.request.method == 'DELETE':
+            return [IsModerator()]
+        return [IsReviewer()]
+
+    def _ensure_video_patch_role(self, request, data):
+        status_only_fields = {'status'}
+        admin_fields = {
+            'title', 'description', 'allow_comments', 'allow_download',
+            'is_featured', 'visibility', 'category_id', 'tag_ids',
+        }
+        provided = {k for k in admin_fields | status_only_fields if k in data}
+        if not provided:
+            return
+        if provided - status_only_fields:
+            if not IsAdmin().has_permission(request, self):
+                raise PermissionDenied('仅管理员可修改视频运营信息')
+
     def get(self, request, pk):
         v = get_object_or_404(Video, pk=pk)
         u = getattr(v, 'user', None)
@@ -343,6 +401,7 @@ class AdminVideoDetailView(APIView):
     def patch(self, request, pk):
         v = get_object_or_404(Video, pk=pk)
         data = request.data or {}
+        self._ensure_video_patch_role(request, data)
         updates: dict[str, object] = {}
         tags_changed = False
         if 'title' in data and isinstance(data.get('title'), str):
@@ -656,6 +715,8 @@ class AdminVideosBulkUpdateView(APIView):
                 raise ValidationError({'status': '取值无效'})
             if st:
                 set_status = st
+        if updates and not IsAdmin().has_permission(request, self):
+            raise PermissionDenied('仅管理员可批量修改视频运营信息')
         qs = Video.objects.filter(id__in=ids)
         affected = qs.count()
         # 若批量设置为发布，做作者邮箱验证校验
@@ -686,7 +747,7 @@ class AdminVideosBulkUpdateView(APIView):
 
 
 class AdminVideosBulkDeleteView(APIView):
-    permission_classes = [IsReviewer]
+    permission_classes = [IsModerator]
 
     def post(self, request):
         ids = request.data.get('video_ids') or request.data.get('ids')
@@ -823,7 +884,7 @@ class AdminCommentsListView(APIView):
 
     def get(self, request):
         qs = Comment.objects.select_related('user', 'video').all()
-        base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         def url_of(rel: str) -> str:
             if media.startswith('http://') or media.startswith('https://'):
@@ -902,7 +963,7 @@ class AdminCommentsListView(APIView):
 
 
 class AdminCommentDetailView(APIView):
-    permission_classes = [IsReviewer]
+    permission_classes = [IsModerator]
 
     def delete(self, request, pk):
         c = get_object_or_404(Comment, pk=pk)
@@ -935,8 +996,7 @@ class AdminUserForceLogoutView(APIView):
     def post(self, request, pk):
         cutoff = int(time.time())
         key = f"logout_after:{pk}"
-        td = settings.SIMPLE_JWT.get('REFRESH_TOKEN_LIFETIME')
-        ttl = int(getattr(td, 'total_seconds')()) if td else 3600
+        ttl = _refresh_lifetime_seconds()
         cache.set(key, cutoff, timeout=ttl)
         try:
             _audit(request, 'user.force_logout', 'user', str(pk), {'cutoff': cutoff})
@@ -988,6 +1048,11 @@ class AdminAuditLogsListView(APIView):
 class AdminCategoriesListView(APIView):
     permission_classes = [IsReviewer]
 
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAdmin()]
+        return [IsReviewer()]
+
     def get(self, request):
         qs = Category.objects.all()
         q = (request.query_params.get('q') or '').strip()
@@ -1019,6 +1084,11 @@ class AdminCategoriesListView(APIView):
 
 class AdminCategoryDetailView(APIView):
     permission_classes = [IsReviewer]
+
+    def get_permissions(self):
+        if self.request.method in {'PATCH', 'DELETE'}:
+            return [IsAdmin()]
+        return [IsReviewer()]
 
     def patch(self, request, pk):
         c = get_object_or_404(Category, pk=pk)
@@ -1061,6 +1131,11 @@ class AdminCategoryDetailView(APIView):
 class AdminTagsListView(APIView):
     permission_classes = [IsReviewer]
 
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAdmin()]
+        return [IsReviewer()]
+
     def get(self, request):
         qs = Tag.objects.all().annotate(usage_count=Count('tag_videos__id', distinct=True))
         q = (request.query_params.get('q') or '').strip()
@@ -1091,6 +1166,11 @@ class AdminTagsListView(APIView):
 
 class AdminTagDetailView(APIView):
     permission_classes = [IsReviewer]
+
+    def get_permissions(self):
+        if self.request.method in {'PATCH', 'DELETE'}:
+            return [IsAdmin()]
+        return [IsReviewer()]
 
     def patch(self, request, pk):
         t = get_object_or_404(Tag, pk=pk)
@@ -1125,7 +1205,7 @@ class AdminTagDetailView(APIView):
 
 
 class AdminTagsBulkDeleteView(APIView):
-    permission_classes = [IsReviewer]
+    permission_classes = [IsAdmin]
 
     def post(self, request):
         ids = request.data.get('ids') or []
@@ -1153,7 +1233,7 @@ class AdminTagsBulkDeleteView(APIView):
 
 
 class AdminTagsMergeView(APIView):
-    permission_classes = [IsReviewer]
+    permission_classes = [IsAdmin]
 
     @transaction.atomic
     def post(self, request):
@@ -1190,6 +1270,11 @@ class AdminTagsMergeView(APIView):
 
 class AdminAnnouncementsListCreateView(APIView):
     permission_classes = [IsReviewer]
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAdmin()]
+        return [IsReviewer()]
 
     def get(self, request):
         p = StandardResultsSetPagination()
@@ -1250,6 +1335,11 @@ class AdminAnnouncementsListCreateView(APIView):
 
 class AdminAnnouncementDetailView(APIView):
     permission_classes = [IsReviewer]
+
+    def get_permissions(self):
+        if self.request.method in {'PATCH', 'DELETE'}:
+            return [IsAdmin()]
+        return [IsReviewer()]
 
     def get(self, request, pk):
         a = get_object_or_404(SystemAnnouncement, pk=pk)
@@ -1364,6 +1454,7 @@ class AdminReportsListView(APIView):
         for r in rows:
             reporter = r.reporter
             handled_by = r.handled_by
+            latest_action = r.actions.select_related('moderator').order_by('-created_at').first()
 
             # 获取目标对象信息
             target_info = None
@@ -1420,6 +1511,15 @@ class AdminReportsListView(APIView):
                 'moderator_notes': r.moderator_notes,
                 'created_at': r.created_at,
                 'updated_at': r.updated_at,
+                'latest_action': {
+                    'action': latest_action.action,
+                    'reason': latest_action.reason,
+                    'created_at': latest_action.created_at,
+                    'moderator': {
+                        'id': str(latest_action.moderator.id) if latest_action.moderator else None,
+                        'username': latest_action.moderator.username if latest_action.moderator else None,
+                    } if latest_action.moderator else None,
+                } if latest_action else None,
             })
 
         return Response(p.format(data, total))
@@ -1482,11 +1582,13 @@ class AdminReportDetailView(APIView):
                         'id': str(u.id),
                         'username': u.username,
                         'nickname': u.nickname,
-                        'email': u.email,
                         'is_active': u.is_active,
                         'is_verified': u.is_verified,
                         'date_joined': u.date_joined,
                     }
+                    role = getattr(request.user, 'admin_role', 'none')
+                    if role in ('admin', 'super_admin'):
+                        target_detail['email'] = u.email
         except Exception:
             pass
 
@@ -1541,6 +1643,8 @@ class AdminReportHandleView(APIView):
 
     def post(self, request, pk):
         report = get_object_or_404(Report, pk=pk)
+        if report.status not in {'pending', 'escalated'}:
+            raise ValidationError({'status': f'该举报当前状态为 {report.status}，不能继续处理'})
 
         action = (request.data.get('action') or '').strip()
         notes = (request.data.get('notes') or '').strip()
@@ -1548,12 +1652,21 @@ class AdminReportHandleView(APIView):
         if not action:
             raise ValidationError({'action': '必填，例如: dismiss, warn, delete_content, ban_user'})
 
-        valid_actions = ['dismiss', 'warn', 'delete_content', 'ban_user', 'ban_temp', 'escalate']
+        valid_actions = ['dismiss', 'warn', 'delete_content', 'ban_user', 'escalate']
         if action not in valid_actions:
             raise ValidationError({'action': f'非法值，可选: {", ".join(valid_actions)}'})
         allowed_actions = _report_target_allowed_actions(report.target_type)
         if action not in allowed_actions:
             raise ValidationError({'action': f'{report.target_type} 举报不支持动作 {action}'})
+        if action == 'escalate' and not notes:
+            raise ValidationError({'notes': '升级处理必须填写交接备注'})
+        if action == 'escalate' and not _can_escalate_report(request.user, report):
+            raise PermissionDenied('当前角色不需要升级该举报，请直接处理')
+        if report.status == 'escalated':
+            if action == 'escalate':
+                raise ValidationError({'action': '该举报已升级，不能重复升级'})
+            if not _can_handle_escalated_report(request.user, report):
+                raise PermissionDenied('该升级举报需由更高权限角色继续处理')
 
         target_user_id = None
         video_id = None
@@ -1575,15 +1688,74 @@ class AdminReportHandleView(APIView):
         except Exception:
             pass
 
+        handled_at = timezone.now()
+        sibling_notes = (notes or '').strip() or '同目标举报已随主处理单一并关闭'
+        settle_related = action in {'delete_content', 'ban_user'}
+        action_result = None
+
         with transaction.atomic():
-            # 更新举报状态
+            if action == 'delete_content':
+                if report.target_type == 'video':
+                    from apps.videos.models import Video
+                    v = Video.objects.filter(id=report.target_id).first()
+                    if not v:
+                        raise ValidationError({'target_id': '举报目标视频不存在或已删除，不能执行删除内容'})
+                    try:
+                        if v.user_id:
+                            from apps.interactions.models import Notification
+                            Notification.objects.create(
+                                user_id=v.user_id,
+                                actor_id=request.user.id,
+                                verb='content_removed',
+                                video_id=None,
+                                comment_id=None,
+                            )
+                    except Exception:
+                        pass
+                    v.delete()
+                    action_result = '视频已删除'
+                elif report.target_type == 'comment':
+                    from apps.interactions.models import Comment
+                    c = Comment.objects.filter(id=report.target_id).first()
+                    if not c:
+                        raise ValidationError({'target_id': '举报目标评论不存在或已删除，不能执行删除内容'})
+                    try:
+                        if c.user_id:
+                            from apps.interactions.models import Notification
+                            Notification.objects.create(
+                                user_id=c.user_id,
+                                actor_id=request.user.id,
+                                verb='content_removed',
+                                video_id=None,
+                                comment_id=None,
+                            )
+                    except Exception:
+                        pass
+                    c.delete()
+                    action_result = '评论已删除'
+            elif action == 'ban_user':
+                if report.target_type != 'user':
+                    raise ValidationError({'action': f'{report.target_type} 举报不支持动作 {action}'})
+                from apps.users.models import User
+                u = User.objects.filter(id=report.target_id).first()
+                if not u:
+                    raise ValidationError({'target_id': '举报目标用户不存在，不能执行封禁'})
+                u.is_active = False
+                u.save(update_fields=['is_active'])
+                action_result = '用户已封禁'
+            elif action == 'warn':
+                action_result = '已记录警告'
+            elif action == 'dismiss':
+                action_result = '举报已驳回'
+            elif action == 'escalate':
+                action_result = '举报已升级'
+
             report.status = 'resolved' if action != 'escalate' else 'escalated'
             report.handled_by = request.user
-            report.handled_at = timezone.now()
+            report.handled_at = handled_at
             report.moderator_notes = notes or report.moderator_notes
             report.save(update_fields=['status', 'handled_by', 'handled_at', 'moderator_notes', 'updated_at'])
 
-            # 记录处理动作
             ModerationAction.objects.create(
                 report=report,
                 moderator=request.user,
@@ -1591,63 +1763,17 @@ class AdminReportHandleView(APIView):
                 reason=notes,
             )
 
-            # 执行具体动作
-            action_result = None
-            try:
-                if action == 'delete_content':
-                    if report.target_type == 'video':
-                        from apps.videos.models import Video
-                        v = Video.objects.filter(id=report.target_id).first()
-                        if v:
-                            try:
-                                if v.user_id:
-                                    from apps.interactions.models import Notification
-                                    Notification.objects.create(
-                                        user_id=v.user_id,
-                                        actor_id=request.user.id,
-                                        verb='content_removed',
-                                        video_id=None,
-                                        comment_id=None,
-                                    )
-                            except Exception:
-                                pass
-                            v.delete()
-                            action_result = '视频已删除'
-                    elif report.target_type == 'comment':
-                        from apps.interactions.models import Comment
-                        c = Comment.objects.filter(id=report.target_id).first()
-                        if c:
-                            try:
-                                if c.user_id:
-                                    from apps.interactions.models import Notification
-                                    Notification.objects.create(
-                                        user_id=c.user_id,
-                                        actor_id=request.user.id,
-                                        verb='content_removed',
-                                        video_id=None,
-                                        comment_id=None,
-                                    )
-                            except Exception:
-                                pass
-                            c.delete()
-                            action_result = '评论已删除'
-                elif action == 'ban_user' and report.target_type == 'user':
-                    from apps.users.models import User
-                    u = User.objects.filter(id=report.target_id).first()
-                    if u:
-                        u.is_active = False
-                        u.save(update_fields=['is_active'])
-                        action_result = '用户已封禁'
-                elif action == 'ban_temp' and report.target_type == 'user':
-                    action_result = '用户暂时封禁（需在用户系统实现）'
-                elif action == 'warn':
-                    action_result = '已记录警告'
-                elif action == 'dismiss':
-                    action_result = '举报已驳回'
-                elif action == 'escalate':
-                    action_result = '举报已升级'
-            except Exception as e:
-                action_result = f'执行动作时出错: {str(e)}'
+            if settle_related:
+                Report.objects.filter(
+                    target_type=report.target_type,
+                    target_id=report.target_id,
+                    status='pending',
+                ).exclude(id=report.id).update(
+                    status='resolved',
+                    handled_by=request.user,
+                    handled_at=handled_at,
+                    moderator_notes=sibling_notes,
+                )
 
         _audit(request, 'report.handle', 'report', str(report.id), {
             'action': action,
@@ -1659,7 +1785,7 @@ class AdminReportHandleView(APIView):
         try:
             from apps.interactions.models import Notification
             # 发送通知
-            if target_user_id and action != 'delete_content':
+            if target_user_id and action not in {'delete_content', 'escalate'}:
                 notify_video_id = video_id
                 notify_comment_id = comment_id
                 verb_map = {
@@ -1667,8 +1793,6 @@ class AdminReportHandleView(APIView):
                     'warn': 'report_warned',
                     'delete_content': 'content_removed',
                     'ban_user': 'account_banned',
-                    'ban_temp': 'account_suspended',
-                    'escalate': 'report_escalated',
                 }
                 verb = verb_map.get(action, 'report_handled')
                 Notification.objects.create(
@@ -1694,11 +1818,11 @@ class AdminSwitchUserView(APIView):
     """切换管理员账号（直接登录到另一个管理员账号）
 
     - 方法：POST /api/admin/switch-user/
-    - 权限：需验证目标管理员凭据
+    - 权限：当前用户必须为超级管理员，且需验证目标管理员凭据
     - 参数：target_username（目标管理员用户名）, target_password（目标管理员密码）
     - 返回：登录后的 token
     """
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [IsSuperAdmin]
 
     def post(self, request):
         target_username = (request.data.get('target_username') or '').strip()
@@ -1721,7 +1845,7 @@ class AdminSwitchUserView(APIView):
 
         # 生成目标用户的 token
         from rest_framework_simplejwt.tokens import RefreshToken
-        refresh = RefreshToken.for_user(target_user)
+        refresh = _apply_refresh_lifetime(RefreshToken.for_user(target_user))
         
         return Response({
             'access': str(refresh.access_token),
@@ -1757,7 +1881,7 @@ class AdminVideoRetryTranscodeView(APIView):
     - 方法：POST /api/admin/videos/<pk>/retry-transcode/
     - 权限：审核员及以上
     """
-    permission_classes = [IsReviewer]
+    permission_classes = [IsModerator]
 
     def post(self, request, pk):
         from apps.videos.models import Video

@@ -75,7 +75,6 @@ class CanHandleReport(permissions.BasePermission):
             'warn': ['reviewer', 'moderator', 'admin', 'super_admin'],
             'escalate': ['reviewer', 'moderator', 'admin', 'super_admin'],
             'delete_content': ['moderator', 'admin', 'super_admin'],
-            'ban_temp': ['admin', 'super_admin'],
             'ban_user': ['admin', 'super_admin'],
         }
         

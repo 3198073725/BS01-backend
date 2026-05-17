@@ -6,6 +6,7 @@ from django.utils import timezone
 from .models import User
 from django.conf import settings
 from django.db import IntegrityError
+from apps.configs.utils import get_system_setting
 
 
 class UserPublicSerializer(serializers.ModelSerializer):
@@ -182,7 +183,7 @@ class RegisterSerializer(serializers.ModelSerializer):
             if domain in deny:
                 raise serializers.ValidationError('该邮箱域名不被允许注册')
             # 可选：检查 MX 记录（需要 dnspython）
-            if settings.EMAIL_CHECK_MX:
+            if bool(get_system_setting('EMAIL_CHECK_MX', getattr(settings, 'EMAIL_CHECK_MX', False))):
                 try:
                     import dns.resolver  # type: ignore
                     try:
@@ -198,7 +199,9 @@ class RegisterSerializer(serializers.ModelSerializer):
         return v
 
     def validate(self, attrs):
-        if settings.REGISTRATION_REQUIRE_CAPTCHA:
+        if not bool(get_system_setting('allow_register', True)):
+            raise serializers.ValidationError({'detail': '当前已关闭新用户注册'})
+        if bool(get_system_setting('REGISTRATION_REQUIRE_CAPTCHA', getattr(settings, 'REGISTRATION_REQUIRE_CAPTCHA', False))):
             captcha = self.initial_data.get('captcha', '')
             if not captcha:
                 raise serializers.ValidationError({'captcha': '缺少验证码'})

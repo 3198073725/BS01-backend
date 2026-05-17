@@ -41,11 +41,30 @@ from apps.interactions.models import Like, Favorite
 from apps.videos.models import WatchLater
 from apps.content.models import Tag, Category
 from apps.tasks.tasks import generate_vtt_and_thumbnail, transcode_video_to_hls
+from apps.configs.utils import get_system_setting
 from django.contrib.postgres.search import TrigramSimilarity
 try:
     from PIL import Image as _PIL_Image  # optional, for image validation
 except Exception:
     _PIL_Image = None
+
+
+def _get_video_upload_max_bytes() -> int:
+    mb = get_system_setting('max_upload_size_mb', None)
+    if mb not in (None, ''):
+        try:
+            return max(1, int(mb)) * 1024 * 1024
+        except Exception:
+            pass
+    return int(get_system_setting('VIDEO_MAX_SIZE_BYTES', getattr(settings, 'VIDEO_MAX_SIZE_BYTES', 524_288_000)))
+
+
+def _get_thumbnail_ratio_tolerance() -> float:
+    raw = get_system_setting('THUMBNAIL_RATIO_TOL', getattr(settings, 'THUMBNAIL_RATIO_TOL', 0.04))
+    try:
+        return float(raw)
+    except Exception:
+        return 0.04
 
 
 def _load_upload_meta_or_403(request, sess: str) -> dict:
@@ -317,7 +336,7 @@ def _start_hls_transcode(src_abs: str, vid_hex: str, width: int, height: int) ->
                 ]
                 subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 entries.append((p['name'], p['h']))
-            base = (getattr(settings, 'SITE_URL', '') or '').rstrip('/')
+            base = (get_system_setting('SITE_URL', '') or '').rstrip('/')
             media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
             def rel(path: str) -> str:
                 return os.path.relpath(path, settings.MEDIA_ROOT).replace('\\', '/')
@@ -351,7 +370,7 @@ class VideoUploadView(APIView):
         file = request.FILES.get('file') or request.FILES.get('video')
         if not file:
             raise ValidationError({'file': '未收到文件'})
-        max_bytes = int(getattr(settings, 'VIDEO_MAX_SIZE_BYTES', 524_288_000))
+        max_bytes = _get_video_upload_max_bytes()
         if file.size and file.size > max_bytes:
             raise ValidationError({'file': '视频文件过大'})
 
@@ -415,7 +434,7 @@ class VideoUploadView(APIView):
             published_at=None,
         )
 
-        base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         t1 = generate_vtt_and_thumbnail.delay(str(v.id))
         t2 = transcode_video_to_hls.delay(str(v.id))
@@ -442,7 +461,7 @@ class VideoListView(APIView):
 
     def get(self, request):
         # base/media for URL building
-        base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         # build queryset with proper joins and projected fields
         # NOTE: 不在此处先过滤 status，便于作者查看自己的未发布视频
@@ -618,7 +637,7 @@ class VideoDetailView(APIView):
         if not _can_view_video(v, viewer):
             raise NotFound('资源不存在')
         can_edit = _can_edit_video(v, viewer)
-        base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         def url_of(rel: str) -> str:
             if media.startswith('http://') or media.startswith('https://'):
@@ -800,7 +819,7 @@ class VideoDetailView(APIView):
             v.save(update_fields=list(dict.fromkeys(fields)))
 
         # 复用 GET 的返回结构
-        base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         def url_of(rel: str) -> str:
             if media.startswith('http://') or media.startswith('https://'):
@@ -963,7 +982,7 @@ class VideoThumbnailPickView(APIView):
             ts = 1.0
         ts = max(0.0, ts)
         # build paths
-        base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         def url_of(rel: str) -> str:
             if media.startswith('http://') or media.startswith('https://'):
@@ -1035,7 +1054,7 @@ class VideoThumbnailUploadView(APIView):
         ext = os.path.splitext(name)[1].lower() or '.jpg'
         if ext not in {'.jpg', '.jpeg', '.png', '.webp'}:
             raise ValidationError({'file': '不支持的图片格式'})
-        max_bytes = int(getattr(settings, 'THUMBNAIL_MAX_SIZE_BYTES', 5 * 1024 * 1024))
+        max_bytes = int(get_system_setting('THUMBNAIL_MAX_SIZE_BYTES', getattr(settings, 'THUMBNAIL_MAX_SIZE_BYTES', 5 * 1024 * 1024)))
         if f.size and int(f.size) > max_bytes:
             raise ValidationError({'file': '图片过大'})
         vid_key = os.path.splitext(os.path.basename((getattr(v.video_file_f, 'name', None) or v.video_file or '')))[0]
@@ -1055,15 +1074,15 @@ class VideoThumbnailUploadView(APIView):
                 with _PIL_Image.open(thumb_abs) as im:
                     w, h = im.size
                 # minimal dimensions and 16:9 ratio tolerance
-                min_w = int(getattr(settings, 'THUMBNAIL_MIN_WIDTH', 480))
-                min_h = int(getattr(settings, 'THUMBNAIL_MIN_HEIGHT', 270))
+                min_w = int(get_system_setting('THUMBNAIL_MIN_WIDTH', getattr(settings, 'THUMBNAIL_MIN_WIDTH', 480)))
+                min_h = int(get_system_setting('THUMBNAIL_MIN_HEIGHT', getattr(settings, 'THUMBNAIL_MIN_HEIGHT', 270)))
                 if w < min_w or h < min_h:
                     try: os.remove(thumb_abs)
                     except Exception: pass
                     raise ValidationError({'file': f'图片分辨率过低（至少 {min_w}x{min_h}）'})
                 ratio = w / float(h or 1)
                 target = 16.0 / 9.0
-                tol = float(getattr(settings, 'THUMBNAIL_RATIO_TOL', 0.04))
+                tol = _get_thumbnail_ratio_tolerance()
                 if abs(ratio - target) > tol:
                     try: os.remove(thumb_abs)
                     except Exception: pass
@@ -1079,7 +1098,7 @@ class VideoThumbnailUploadView(APIView):
         v.thumbnail_f = thumb_rel[:200]
         v.save(update_fields=['thumbnail', 'thumbnail_f', 'updated_at'])
         # url
-        base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         def url_of(rel: str) -> str:
             if media.startswith('http://') or media.startswith('https://'):
@@ -1128,7 +1147,7 @@ class UploadInitView(APIView):
         filesize = int(data.get('filesize') or 0)
         if not filename or filesize <= 0:
             raise ValidationError({'detail': 'filename/filesize 无效'})
-        max_bytes = int(getattr(settings, 'VIDEO_MAX_SIZE_BYTES', 524_288_000))
+        max_bytes = _get_video_upload_max_bytes()
         if filesize > max_bytes:
             raise ValidationError({'detail': '视频文件过大'})
         ext = os.path.splitext(filename)[1].lower()
@@ -1254,7 +1273,7 @@ class UploadCompleteView(APIView):
             shutil.rmtree(sess)
         except Exception:
             pass
-        base = (getattr(settings, 'SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+        base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         t1 = generate_vtt_and_thumbnail.delay(str(v.id))
         t2 = transcode_video_to_hls.delay(str(v.id))
