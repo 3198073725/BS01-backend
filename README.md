@@ -1,87 +1,107 @@
-# VidSprout Backend | 视频平台后端核心
+# VidSprout Backend
 
-VidSprout 是一个现代化的视频分享平台，后端基于 Python Django 架构，提供了从视频上传、自动化转码切片到社交互动的全栈服务。
+`backend/` 是项目的 Django 后端，负责：
 
-## 架构概览
+- REST API
+- JWT 认证
+- 视频、评论、关注、通知等业务接口
+- ASGI WebSocket
+- Celery 异步任务入口
 
-本项目采用解耦的微服务化设计思路（在单体仓库中实现）：
-- **API 层**: 基于 Django REST Framework (DRF)，提供 RESTful 接口。
-- **业务逻辑层**: 核心逻辑封装在 `services` 与 `serializers` 中，确保逻辑复用。
-- **任务层**: 利用 Celery + Redis 实现视频转码、分发等高耗时异步操作。
-- **存储层**: 
-- **数据库**: PostgreSQL（默认）处理结构化数据；也可通过 `DB_ENGINE` 切换到其他 Django 支持的后端。
-  - **文件存储**: 支持本地或云端存储转码后的 DASH/HLS 流媒体文件。
-  - **多媒体处理**: 深度集成 FFmpeg 和 Bento4 进行自动化切片与加密。
+## 当前技术栈
 
-## 核心功能详解
+- Django + Django REST Framework
+- ASGI: `uvicorn`
+- 认证: Simple JWT
+- 异步任务: Celery
+- 缓存 / broker: Redis
+- 数据库: PostgreSQL 优先
 
-### 1. 视频流水线 (Video Pipeline)
-- **智能转码**: 自动识别上传格式并转换为 H.264 标准格式。
-- **流式分发**: 自动生成 DASH (`.mpd`) 和 HLS (`.m3u8`) 列表，支持动态码率适配。
-- **封面提取**: 自动从视频流中抓取高分辨率封面。
+## 关键入口
 
-### 2. 社交互动架构
-- **用户关系**: 完整的关注/粉丝/拉黑模型，支持双向动态追踪。
-- **互动矩阵**: 集成点赞、踩、收藏、弹幕、评论（支持二级回复）。
-- **个性化列表**: 观看历史、稍后再看（支持断点续看数据存储）。
+- Django settings: [backend/settings.py](/root/BS01/backend/backend/settings.py:1)
+- URL 路由: [backend/urls.py](/root/BS01/backend/backend/urls.py:1)
+- 管理命令入口: [manage.py](/root/BS01/backend/manage.py:1)
 
-### 3. 系统通知
-- 基于长轮询或 WebSocket（可选）的系统通知分发。
+## 运行方式
 
-## 技术栈
+### 开发环境
 
-| 组件 | 技术 |
-| :--- | :--- |
-| **后端框架** | Django 4.2+, DRF 3.14+ |
-| **异步任务** | Celery 5.3+ |
-| **缓存/消息中间件** | Redis 7.0+ |
-| **视频处理** | Bento4 (DASH 打包), FFmpeg (转码) |
-| **身份认证** | Simple JWT |
+在仓库根目录创建虚拟环境并安装依赖后：
 
-## 部署指南
+```bash
+cd /root/BS01/backend
+../.venv/bin/python manage.py migrate
+../.venv/bin/python manage.py runserver 0.0.0.0:8000
+```
 
-### 环境准备
-- Python 3.9+
-- PostgreSQL 14+（推荐）
-- Redis 7.0+
-- FFmpeg & Bento4 工具链（需加入系统 PATH）
+### 更接近线上
 
-### 快速启动
-1. **安装依赖**
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. **环境配置**
-   创建 `.env` 文件（参考 `.env.example`）：
-   ```ini
-   DEBUG=True
-   SECRET_KEY=your_secret_key
-   DB_ENGINE=django.db.backends.postgresql
-   DB_NAME=vidsprout
-   DB_USER=vidsprout
-   DB_PASSWORD=change-me
-   DB_HOST=127.0.0.1
-   DB_PORT=5432
-   REDIS_URL=redis://localhost:6379/0
-   ```
-3. **初始化数据库**
-   ```bash
-   python manage.py migrate
-   python manage.py createsuperuser
-   ```
-4. **启动服务**
-   ```bash
-   # 启动 Django API
-   python manage.py runserver
-   
-   # 启动 Celery Worker (转码任务)
-   celery -A backend worker -l info
-   ```
+如果要验证 ASGI / WebSocket，直接跑 `uvicorn` 更接近实际部署：
 
-## 开发规约
-- **代码风格**: 遵循 PEP8，使用 `isort` 和 `black` 进行格式化。
-- **接口文档**: 访问 `/api/schema/swagger-ui/` 或 `/api/schema/redoc/` 查看自动生成的文档。
-- **测试**: 运行 `python manage.py test` 确保核心逻辑覆盖。
+```bash
+cd /root/BS01
+./.venv/bin/uvicorn backend.asgi:application --host 0.0.0.0 --port 8000 --workers 1
+```
 
----
-*VidSprout - 开源视频平台的未来*
+## 环境变量
+
+后端默认读取：
+
+- [../deploy/env.example](/root/BS01/deploy/env.example:1)
+- `backend/.env`
+
+最少要确认：
+
+- `SECRET_KEY`
+- `DEBUG`
+- `ALLOWED_HOSTS`
+- `SITE_URL`
+- `DB_*`
+- `REDIS_URL`
+- `CORS_ALLOWED_ORIGINS`
+- `CSRF_TRUSTED_ORIGINS`
+
+## WebSocket
+
+系统配置同步使用：
+
+- `/ws/system-events/`
+
+这要求后端必须跑 ASGI。当前仓库已经按这个方向运行，不能退回 WSGI-only 入口。
+
+## Celery
+
+视频转码、缩略图、部分异步处理依赖 Celery。
+
+本地启动示例：
+
+```bash
+cd /root/BS01
+./.venv/bin/celery -A backend worker -l info
+```
+
+如果使用生产环境，通常还会有：
+
+- `bs01-celery.service`
+- `bs01-celery-transcode.service`
+- `bs01-celery-beat.service`
+
+## 验证
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8000/api/health/
+```
+
+接口文档：
+
+- `/api/schema/swagger-ui/`
+- `/api/schema/redoc/`
+
+## 相关文档
+
+- 仓库总览：[../README.md](/root/BS01/README.md:1)
+- 通用部署：[../deploy/README.md](/root/BS01/deploy/README.md:1)
+- 当前机器部署：[../2H2G3M/BACKEND_DEPLOY.md](/root/BS01/2H2G3M/BACKEND_DEPLOY.md:1)
