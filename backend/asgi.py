@@ -15,7 +15,18 @@ https://docs.djangoproject.com/en/6.0/howto/deployment/asgi/
 import os
 
 from django.core.asgi import get_asgi_application
+from .system_events import websocket_application
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'backend.settings')
 
-application = get_asgi_application()
+django_asgi_app = get_asgi_application()
+
+
+async def application(scope, receive, send):
+    if scope['type'] == 'websocket':
+        if scope.get('path') == '/ws/system-events/':
+            await websocket_application(scope, receive, send)
+            return
+        await send({'type': 'websocket.close', 'code': 4404})
+        return
+    await django_asgi_app(scope, receive, send)

@@ -9,6 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 from apps.adminapi.permissions import IsAdmin
 from apps.configs.utils import invalidate_config_cache
+from backend.system_events import publish_config_updated
 
 # 加载 .env 文件（如果存在）
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -295,12 +296,14 @@ class AdminConfigUpdateView(APIView):
             updated_keys.append(k)
 
         # 每次修改配置，自动更新版本号以强制客户端拉取新配置
-        version_key, _ = ConfigKey.objects.get_or_create(namespace=ns, key='config_version', defaults={'value_type': 'int', 'default_value': int(time.time())})
+        version = int(time.time())
+        version_key, _ = ConfigKey.objects.get_or_create(namespace=ns, key='config_version', defaults={'value_type': 'int', 'default_value': version})
         ConfigEntry.objects.update_or_create(
             key=version_key,
             content_type__isnull=True,
-            defaults={'value': int(time.time())}
+            defaults={'value': version}
         )
         invalidate_config_cache('system')
+        publish_config_updated(version=version, changed_keys=updated_keys, reload_required=False)
 
-        return Response({'status': 'ok', 'updated': updated_keys, 'version': int(time.time())})
+        return Response({'status': 'ok', 'updated': updated_keys, 'version': version})

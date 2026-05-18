@@ -136,11 +136,17 @@ class FifteenthRoundLogicFixTests(TestCase):
         resp = admin_client.get('/api/configs/admin/list/')
         self.assertEqual(resp.status_code, 200)
 
-        resp = admin_client.post('/api/configs/admin/update/', {
-            'featured_limit': 6,
-        }, format='json')
+        with patch('apps.configs.views.publish_config_updated') as publish_mock:
+            resp = admin_client.post('/api/configs/admin/update/', {
+                'featured_limit': 6,
+            }, format='json')
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data['status'], 'ok')
+        publish_mock.assert_called_once()
+        kwargs = publish_mock.call_args.kwargs
+        self.assertEqual(kwargs['changed_keys'], ['featured_limit'])
+        self.assertFalse(kwargs['reload_required'])
+        self.assertEqual(kwargs['version'], resp.data['version'])
 
     def test_reviewer_cannot_patch_users_but_admin_can(self):
         reviewer_client = self.auth(self.reviewer)
