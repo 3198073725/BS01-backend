@@ -20,8 +20,15 @@ from apps.users.models import User
 from apps.videos.models import Video, VideoTag
 from apps.interactions.models import Comment, History, Like
 from apps.content.models import AuditLog, Category, Tag
+from apps.content.moderation import check_zhipu_moderation
+from apps.content.comment_moderation_rules import (
+    COMMENT_PATTERN_RULES,
+    COMMENT_TEXT_CANONICAL_RULES,
+    DEFAULT_COMMENT_BLOCKED_KEYWORDS,
+)
 from apps.notifications.models import SystemAnnouncement
-from apps.configs.utils import get_system_setting
+from apps.configs.utils import get_system_setting, set_config
+from backend.system_events import publish_config_updated
 from .permissions import IsReviewer, IsModerator, IsAdmin, IsSuperAdmin, CanHandleReport
 
 
@@ -990,6 +997,34 @@ class AdminMeView(APIView):
         })
 
 
+class AdminModerationHealthCheckView(APIView):
+    permission_classes = [IsAdmin]
+
+    def post(self, request):
+        body = request.data if isinstance(request.data, dict) else {}
+        allowed_keys = {
+            'ZHIPU_API_KEY',
+            'ZHIPU_BASE_URL',
+            'ZHIPU_MODERATION_MODEL',
+            'ZHIPU_MODERATION_TIMEOUT_SECONDS',
+            'ZHIPU_MODERATION_FAIL_CLOSED',
+            'ZHIPU_MODERATION_BLOCKED_CATEGORIES',
+            'MODERATION_MEDIA_PUBLIC_BASE_URL',
+            'SITE_URL',
+        }
+        overrides = {k: body.get(k) for k in allowed_keys if k in body}
+        result = check_zhipu_moderation(overrides=overrides)
+        try:
+            _audit(request, 'moderation.check', 'system', None, {
+                'ok': bool(result.get('ok')),
+                'model': result.get('model'),
+                'base_url': result.get('base_url'),
+            })
+        except Exception:
+            pass
+        return Response(result, status=200 if result.get('ok') else 400)
+
+
 class AdminUserForceLogoutView(APIView):
     permission_classes = [IsAdmin]
 
@@ -1010,6 +1045,9 @@ class AdminAuditLogsListView(APIView):
 
     def get(self, request):
         qs = AuditLog.objects.select_related('actor').all()
+        verb = (request.query_params.get('verb') or '').strip()
+        if verb:
+            qs = qs.filter(verb__iexact=verb)
         actor_id = request.query_params.get('actor_id')
         if actor_id:
             try:
@@ -1020,6 +1058,12 @@ class AdminAuditLogsListView(APIView):
         tt = (request.query_params.get('target_type') or '').strip()
         if tt:
             qs = qs.filter(target_type__iexact=tt)
+        meta_source = (request.query_params.get('source') or '').strip()
+        if meta_source:
+            qs = qs.filter(meta__source=meta_source)
+        meta_scenario = (request.query_params.get('scenario') or '').strip()
+        if meta_scenario:
+            qs = qs.filter(meta__scenario=meta_scenario)
         tid = request.query_params.get('target_id')
         if tid:
             try:
@@ -1043,6 +1087,326 @@ class AdminAuditLogsListView(APIView):
                 'created_at': a.created_at,
             })
         return Response(p.format(data, total))
+
+
+class AdminAuditLogsAutomodSummaryView(APIView):
+    permission_classes = [IsReviewer]
+
+    def get(self, request):
+        qs = AuditLog.objects.filter(verb='content.automod.blocked').order_by('-created_at')
+        meta_source = (request.query_params.get('source') or '').strip()
+        if meta_source:
+            qs = qs.filter(meta__source=meta_source)
+        meta_scenario = (request.query_params.get('scenario') or '').strip()
+        if meta_scenario:
+            qs = qs.filter(meta__scenario=meta_scenario)
+        days = 7
+        try:
+            days = max(1, min(90, int(request.query_params.get('days') or 7)))
+        except Exception:
+            days = 7
+        since = timezone.now() - timezone.timedelta(days=days)
+        qs = qs.filter(created_at__gte=since)
+
+        summary: dict[str, dict] = {}
+        total_hits = 0
+        for row in qs.only('meta', 'created_at'):
+            meta = row.meta or {}
+            details = meta.get('matched_details') or []
+            if not isinstance(details, list):
+                details = []
+            if details:
+                for detail in details:
+                    if not isinstance(detail, dict):
+                        continue
+                    label = str(detail.get('label') or '').strip()
+                    if not label:
+                        continue
+                    detail_type = str(detail.get('type') or '').strip() or 'rule'
+                    matched_text = str(detail.get('matched_text') or '').strip()
+                    key = f'{detail_type}::{label}::{matched_text}'
+                    item = summary.setdefault(key, {
+                        'type': detail_type,
+                        'label': label,
+                        'matched_text': matched_text,
+                        'count': 0,
+                        'latest_at': None,
+                        'scenarios': {},
+                        'sources': {},
+                    })
+                    item['count'] += 1
+                    total_hits += 1
+                    created_at = row.created_at
+                    if item['latest_at'] is None or created_at > item['latest_at']:
+                        item['latest_at'] = created_at
+                    scenario = str(meta.get('scenario') or '').strip() or 'unknown'
+                    source = str(meta.get('source') or '').strip() or 'unknown'
+                    item['scenarios'][scenario] = int(item['scenarios'].get(scenario) or 0) + 1
+                    item['sources'][source] = int(item['sources'].get(source) or 0) + 1
+            else:
+                for keyword in meta.get('matched_keywords') or []:
+                    label = str(keyword or '').strip()
+                    if not label:
+                        continue
+                    key = f'keyword::{label}::{label}'
+                    item = summary.setdefault(key, {
+                        'type': 'keyword',
+                        'label': label,
+                        'matched_text': label,
+                        'count': 0,
+                        'latest_at': None,
+                        'scenarios': {},
+                        'sources': {},
+                    })
+                    item['count'] += 1
+                    total_hits += 1
+                    created_at = row.created_at
+                    if item['latest_at'] is None or created_at > item['latest_at']:
+                        item['latest_at'] = created_at
+                    scenario = str(meta.get('scenario') or '').strip() or 'unknown'
+                    source = str(meta.get('source') or '').strip() or 'unknown'
+                    item['scenarios'][scenario] = int(item['scenarios'].get(scenario) or 0) + 1
+                    item['sources'][source] = int(item['sources'].get(source) or 0) + 1
+
+        top_n = 20
+        try:
+            top_n = max(1, min(100, int(request.query_params.get('limit') or 20)))
+        except Exception:
+            top_n = 20
+        rows = sorted(summary.values(), key=lambda item: (-item['count'], -(item['latest_at'].timestamp() if item['latest_at'] else 0)))[:top_n]
+        data = [{
+            'type': item['type'],
+            'label': item['label'],
+            'matched_text': item['matched_text'],
+            'count': item['count'],
+            'latest_at': item['latest_at'],
+            'scenarios': item['scenarios'],
+            'sources': item['sources'],
+        } for item in rows]
+        return Response({
+            'days': days,
+            'total_rules': len(summary),
+            'total_hits': total_hits,
+            'results': data,
+        })
+
+
+class AdminAutomodRuleApplyView(APIView):
+    permission_classes = [IsAdmin]
+
+    @staticmethod
+    def _append_line(raw_value: str, line: str) -> tuple[str, bool]:
+        lines = [str(item or '').strip() for item in str(raw_value or '').splitlines() if str(item or '').strip()]
+        if line in lines:
+            return '\n'.join(lines), False
+        lines.append(line)
+        return '\n'.join(lines), True
+
+    @staticmethod
+    def _append_keyword(raw_value: str, keyword: str) -> tuple[str, bool]:
+        items: list[str] = []
+        seen: set[str] = set()
+        for chunk in str(raw_value or '').replace(',', '\n').splitlines():
+            item = str(chunk or '').strip()
+            if not item:
+                continue
+            lowered = item.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            items.append(item)
+        lowered_keyword = keyword.lower()
+        if lowered_keyword in seen:
+            return '\n'.join(items), False
+        items.append(keyword)
+        return '\n'.join(items), True
+
+    @staticmethod
+    def _remove_line(raw_value: str, line: str) -> tuple[str, bool]:
+        lines = [str(item or '').strip() for item in str(raw_value or '').splitlines() if str(item or '').strip()]
+        kept = [item for item in lines if item != line]
+        return '\n'.join(kept), len(kept) != len(lines)
+
+    @staticmethod
+    def _remove_keyword(raw_value: str, keyword: str) -> tuple[str, bool]:
+        items = [str(item or '').strip() for item in str(raw_value or '').replace(',', '\n').splitlines() if str(item or '').strip()]
+        lowered_keyword = keyword.lower()
+        kept = [item for item in items if item.lower() != lowered_keyword]
+        return '\n'.join(kept), len(kept) != len(items)
+
+    @staticmethod
+    def _resolve_rule_target(rule_kind: str, content_type: str) -> tuple[str, str]:
+        mapping = {
+            ('keyword', 'comment'): ('COMMENT_BLOCKED_KEYWORDS', 'keyword'),
+            ('canonical', 'comment'): ('COMMENT_CANONICAL_RULES', 'canonical'),
+            ('pattern', 'comment'): ('COMMENT_PATTERN_RULES', 'pattern'),
+            ('keyword', 'video'): ('VIDEO_BLOCKED_KEYWORDS', 'keyword'),
+        }
+        result = mapping.get((rule_kind, content_type))
+        if not result:
+            raise ValidationError({'rule_type': '当前仅支持评论关键词/归一化/正则，以及视频关键词'})
+        return result
+
+    @staticmethod
+    def _builtin_rule_lines(rule_kind: str, content_type: str) -> set[str]:
+        if content_type != 'comment':
+            return set()
+        if rule_kind == 'keyword':
+            return {str(item).strip() for item in DEFAULT_COMMENT_BLOCKED_KEYWORDS if str(item).strip()}
+        if rule_kind == 'canonical':
+            return {f'{src}={dst}' for src, dst in COMMENT_TEXT_CANONICAL_RULES if str(src).strip() and str(dst).strip()}
+        if rule_kind == 'pattern':
+            return {f'{pattern.pattern}={label}' for pattern, label in COMMENT_PATTERN_RULES if str(pattern.pattern).strip() and str(label).strip()}
+        return set()
+
+    def post(self, request):
+        rule_type = str(request.data.get('rule_type') or '').strip().lower()
+        content_type = str(request.data.get('content_type') or 'comment').strip().lower()
+        label = str(request.data.get('label') or '').strip()
+        matched_text = str(request.data.get('matched_text') or '').strip()
+        if rule_type not in {'keyword', 'canonical', 'pattern'}:
+            raise ValidationError({'rule_type': '仅支持 keyword、canonical 或 pattern'})
+        if content_type not in {'comment', 'video'}:
+            raise ValidationError({'content_type': '仅支持 comment 或 video'})
+        setting_key, normalized_rule_type = self._resolve_rule_target(rule_type, content_type)
+        if rule_type == 'keyword':
+            if not label:
+                raise ValidationError({'label': '缺少关键词'})
+            rule_line = label
+            builtin_lines = self._builtin_rule_lines(rule_type, content_type)
+            if rule_line in builtin_lines:
+                return Response({
+                    'status': 'ok',
+                    'added': False,
+                    'content_type': content_type,
+                    'rule_type': normalized_rule_type,
+                    'setting_key': setting_key,
+                    'rule_line': rule_line,
+                    'version': int(time.time()),
+                    'source': 'default',
+                })
+            current_value = str(get_system_setting(setting_key, '') or '')
+            updated_value, added = self._append_keyword(current_value, rule_line)
+        else:
+            if not label or not matched_text:
+                raise ValidationError({'detail': '缺少规则内容'})
+            if rule_type == 'canonical' and label == matched_text:
+                raise ValidationError({'matched_text': '归一化规则需要变体和值不同'})
+            rule_line = f'{matched_text}={label}'
+            builtin_lines = self._builtin_rule_lines(rule_type, content_type)
+            if rule_line in builtin_lines:
+                return Response({
+                    'status': 'ok',
+                    'added': False,
+                    'content_type': content_type,
+                    'rule_type': normalized_rule_type,
+                    'setting_key': setting_key,
+                    'rule_line': rule_line,
+                    'version': int(time.time()),
+                    'source': 'default',
+                })
+            current_value = str(get_system_setting(setting_key, '') or '')
+            updated_value, added = self._append_line(current_value, rule_line)
+
+        if not setting_key:
+            raise ValidationError({'detail': '缺少规则内容'})
+        set_config('system', setting_key, updated_value, value_type='string')
+
+        version = int(time.time())
+        set_config('system', 'config_version', version, value_type='int')
+        publish_config_updated(
+            version=version,
+            changed_keys=[setting_key],
+            reload_required=False,
+        )
+        try:
+            _audit(
+                request,
+                'content.automod.rule_apply',
+                'config',
+                None,
+                {
+                    'rule_type': normalized_rule_type,
+                    'content_type': content_type,
+                    'setting_key': setting_key,
+                    'rule_line': rule_line,
+                    'added': added,
+                },
+            )
+        except Exception:
+            pass
+        return Response({
+            'status': 'ok',
+            'added': added,
+            'content_type': content_type,
+            'rule_type': normalized_rule_type,
+            'setting_key': setting_key,
+            'rule_line': rule_line,
+            'version': version,
+        })
+
+    def delete(self, request):
+        rule_type = str(request.data.get('rule_type') or '').strip().lower()
+        content_type = str(request.data.get('content_type') or 'comment').strip().lower()
+        label = str(request.data.get('label') or '').strip()
+        matched_text = str(request.data.get('matched_text') or '').strip()
+        if rule_type not in {'keyword', 'canonical', 'pattern'}:
+            raise ValidationError({'rule_type': '仅支持 keyword、canonical 或 pattern'})
+        if content_type not in {'comment', 'video'}:
+            raise ValidationError({'content_type': '仅支持 comment 或 video'})
+        setting_key, normalized_rule_type = self._resolve_rule_target(rule_type, content_type)
+        if rule_type == 'keyword':
+            if not label:
+                raise ValidationError({'label': '缺少关键词'})
+            rule_line = label
+            if rule_line in self._builtin_rule_lines(rule_type, content_type):
+                raise ValidationError({'detail': '内置规则不能删除'})
+            current_value = str(get_system_setting(setting_key, '') or '')
+            updated_value, removed = self._remove_keyword(current_value, rule_line)
+        else:
+            if not label or not matched_text:
+                raise ValidationError({'detail': '缺少规则内容'})
+            rule_line = f'{matched_text}={label}'
+            if rule_line in self._builtin_rule_lines(rule_type, content_type):
+                raise ValidationError({'detail': '内置规则不能删除'})
+            current_value = str(get_system_setting(setting_key, '') or '')
+            updated_value, removed = self._remove_line(current_value, rule_line)
+
+        if removed:
+            set_config('system', setting_key, updated_value, value_type='string')
+
+        version = int(time.time())
+        set_config('system', 'config_version', version, value_type='int')
+        publish_config_updated(
+            version=version,
+            changed_keys=[setting_key],
+            reload_required=False,
+        )
+        try:
+            _audit(
+                request,
+                'content.automod.rule_remove',
+                'config',
+                None,
+                {
+                    'rule_type': normalized_rule_type,
+                    'content_type': content_type,
+                    'setting_key': setting_key,
+                    'rule_line': rule_line,
+                    'removed': removed,
+                },
+            )
+        except Exception:
+            pass
+        return Response({
+            'status': 'ok',
+            'removed': removed,
+            'content_type': content_type,
+            'rule_type': normalized_rule_type,
+            'setting_key': setting_key,
+            'rule_line': rule_line,
+            'version': version,
+        })
 
 
 class AdminCategoriesListView(APIView):

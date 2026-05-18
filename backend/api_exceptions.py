@@ -21,6 +21,31 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _first_error_message(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            msg = _first_error_message(item)
+            if msg:
+                return msg
+        return ''
+    if isinstance(value, dict):
+        preferred_keys = ('detail', 'non_field_errors', 'content')
+        for key in preferred_keys:
+            if key in value:
+                msg = _first_error_message(value.get(key))
+                if msg:
+                    return msg
+        for item in value.values():
+            msg = _first_error_message(item)
+            if msg:
+                return msg
+    return str(value).strip()
+
+
 def custom_exception_handler(exc: Exception, context: dict[str, Any]) -> Response | None:
     # 先让 DRF 生成基础 Response
     resp = drf_exception_handler(exc, context)
@@ -50,8 +75,8 @@ def custom_exception_handler(exc: Exception, context: dict[str, Any]) -> Respons
             errors = resp.data.get('errors', None)
         else:
             code = 'validation_error'
-            detail = '参数校验失败'
             errors = resp.data
+            detail = _first_error_message(errors) or '参数校验失败'
     elif isinstance(exc, Throttled):
         # 429 节流统一为 cooling_down，并返回剩余秒数
         code = 'cooling_down'

@@ -131,6 +131,26 @@ def _extract_token(scope):
     return ''
 
 
+def _scope_meta(scope) -> dict:
+    headers = {}
+    for raw_name, raw_value in (scope.get('headers') or []):
+        try:
+            headers[raw_name.decode('utf-8', errors='ignore').lower()] = raw_value.decode('utf-8', errors='ignore')
+        except Exception:
+            continue
+    client = scope.get('client') or ('', '')
+    token = _extract_token(scope)
+    return {
+        'path': scope.get('path') or '',
+        'client_ip': client[0] if isinstance(client, (list, tuple)) and client else '',
+        'host': headers.get('host', ''),
+        'origin': headers.get('origin', ''),
+        'user_agent': headers.get('user-agent', '')[:200],
+        'token_present': bool(token),
+        'token_prefix': token[:12] if token else '',
+    }
+
+
 def authenticate_scope(scope):
     token = _extract_token(scope)
     if not token:
@@ -148,12 +168,18 @@ def authenticate_scope(scope):
 
 
 async def websocket_application(scope, receive, send):
+    meta = _scope_meta(scope)
+    user = None
     try:
-        authenticate_scope(scope)
-    except AuthenticationFailed:
-        await send({'type': 'websocket.close', 'code': 4401})
-        return
+        user = authenticate_scope(scope)
+    except AuthenticationFailed as exc:
+        logger.warning('System event websocket auth failed, fallback to anonymous: %s | meta=%s', exc, meta)
 
+    logger.info(
+        'System event websocket accepted | meta=%s user_id=%s',
+        meta,
+        getattr(user, 'id', None),
+    )
     await send({'type': 'websocket.accept'})
     loop = asyncio.get_running_loop()
     queue = asyncio.Queue()
@@ -169,6 +195,11 @@ async def websocket_application(scope, receive, send):
         while True:
             event = await receive()
             if event['type'] == 'websocket.disconnect':
+                logger.info(
+                    'System event websocket disconnected | meta=%s code=%s',
+                    meta,
+                    event.get('code'),
+                )
                 break
             if event['type'] == 'websocket.receive' and event.get('text') == 'ping':
                 await send({'type': 'websocket.send', 'text': '{"type":"pong"}'})
@@ -187,5 +218,5 @@ async def websocket_application(scope, receive, send):
         except asyncio.CancelledError:
             pass
         except Exception:
-            logger.debug('System event websocket task stopped with error', exc_info=True)
+            logger.warning('System event websocket task stopped with error | meta=%s', meta, exc_info=True)
     broker.unregister(client)

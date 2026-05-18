@@ -24,6 +24,11 @@ from apps.videos.models import Video, WatchLater
 from django.conf import settings
 from backend.common.pagination import StandardResultsSetPagination
 from apps.configs.utils import get_system_setting
+from apps.content.moderation import (
+    get_automod_reject_message,
+    log_automod_block,
+    review_comment_text,
+)
 
 
 def _parse_uuid(value, field_name: str) -> str:
@@ -810,6 +815,21 @@ class CommentsListCreateView(APIView):
         # 若作者关闭评论，任何用户均不可评论（完全关闭）
         if not bool(getattr(video, 'allow_comments', True)):
             raise PermissionDenied('评论已关闭')
+        moderation = review_comment_text(content)
+        if not moderation.allowed:
+            log_automod_block(
+                actor=request.user,
+                target_type='comment',
+                target_id=None,
+                scenario='comment.create',
+                matched_keywords=moderation.matched_keywords,
+                matched_details=moderation.matched_details,
+                source=moderation.source,
+                flagged_categories=moderation.flagged_categories,
+                category_scores=moderation.category_scores,
+                error=moderation.error,
+            )
+            raise ValidationError({'content': get_automod_reject_message()})
         c = Comment.objects.create(content=content, user=request.user, video=video, parent=parent)
         setattr(c, 'replies_count', 0)
         ser = CommentSerializer(c, context={'request': request})

@@ -41,6 +41,12 @@ from apps.interactions.models import Like, Favorite
 from apps.videos.models import WatchLater
 from apps.content.models import Tag, Category
 from apps.tasks.tasks import generate_vtt_and_thumbnail, transcode_video_to_hls
+from apps.tasks.tasks import moderate_video_content
+from apps.content.moderation import (
+    get_automod_reject_message,
+    log_automod_block,
+    review_video_text,
+)
 from apps.configs.utils import get_system_setting
 from django.contrib.postgres.search import TrigramSimilarity
 try:
@@ -417,6 +423,11 @@ class VideoUploadView(APIView):
         thumb_exists = _make_thumbnail(video_abs, thumb_abs, ts_sec=max(1, int((duration or 0) // 2) if duration else 1))
 
         # 创建视频记录
+        moderation = review_video_text(
+            request.data.get('title') or os.path.splitext(name)[0] or '未命名视频',
+            request.data.get('description') or '',
+            name,
+        )
         v = Video.objects.create(
             title=(request.data.get('title') or os.path.splitext(name)[0] or '未命名视频')[:200],
             description=request.data.get('description') or '',
@@ -438,6 +449,19 @@ class VideoUploadView(APIView):
         media = getattr(settings, 'MEDIA_URL', '/media').rstrip('/')
         t1 = generate_vtt_and_thumbnail.delay(str(v.id))
         t2 = transcode_video_to_hls.delay(str(v.id))
+        if not moderation.allowed:
+            log_automod_block(
+                actor=request.user,
+                target_type='video',
+                target_id=v.id,
+                scenario='video.upload',
+                matched_keywords=moderation.matched_keywords,
+                matched_details=moderation.matched_details,
+                source=moderation.source,
+                flagged_categories=moderation.flagged_categories,
+                category_scores=moderation.category_scores,
+                error=moderation.error,
+            )
         return Response({
             'status': 'processing',
             'id': str(v.id),
@@ -447,6 +471,10 @@ class VideoUploadView(APIView):
             'duration': v.duration,
             'width': v.width,
             'height': v.height,
+            'moderation': {
+                'blocked': not moderation.allowed,
+                'message': get_automod_reject_message() if not moderation.allowed else '',
+            },
         }, status=status.HTTP_202_ACCEPTED)
 
 
@@ -802,6 +830,11 @@ class VideoDetailView(APIView):
                     VideoTag.objects.filter(video=v, tag_id__in=del_ids).delete()
                     tags_changed = True
         if updated:
+            moderation = review_video_text(
+                v.title if isinstance(title, str) else getattr(v, 'title', ''),
+                v.description if isinstance(description, str) else getattr(v, 'description', ''),
+                getattr(v, 'video_file', ''),
+            )
             fields = ['updated_at']
             if isinstance(title, str):
                 fields.append('title')
@@ -815,8 +848,25 @@ class VideoDetailView(APIView):
                 fields.append('visibility')
             if 'category_id' in data:
                 fields.append('category')
+            if not moderation.allowed:
+                v.status = 'draft'
+                v.published_at = None
+                fields.extend(['status', 'published_at'])
+                log_automod_block(
+                    actor=request.user,
+                    target_type='video',
+                    target_id=v.id,
+                    scenario='video.update',
+                    matched_keywords=moderation.matched_keywords,
+                    matched_details=moderation.matched_details,
+                    source=moderation.source,
+                    flagged_categories=moderation.flagged_categories,
+                    category_scores=moderation.category_scores,
+                    error=moderation.error,
+                )
             # 去重
             v.save(update_fields=list(dict.fromkeys(fields)))
+            moderate_video_content.delay(str(v.id))
 
         # 复用 GET 的返回结构
         base = (get_system_setting('SITE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
@@ -1007,6 +1057,7 @@ class VideoThumbnailPickView(APIView):
             v.save(update_fields=['thumbnail', 'thumbnail_f', 'updated_at'])
         except Exception:
             pass
+        moderate_video_content.delay(str(v.id))
         return Response({'thumbnail_url': url_of(thumb_rel)})
 
 
@@ -1269,6 +1320,24 @@ class UploadCompleteView(APIView):
             upload_status='completed',
             user=request.user,
         )
+        moderation = review_video_text(
+            title or os.path.splitext(meta['filename'])[0] or '未命名视频',
+            description or '',
+            meta['filename'],
+        )
+        if not moderation.allowed:
+            log_automod_block(
+                actor=request.user,
+                target_type='video',
+                target_id=v.id,
+                scenario='video.upload.complete',
+                matched_keywords=moderation.matched_keywords,
+                matched_details=moderation.matched_details,
+                source=moderation.source,
+                flagged_categories=moderation.flagged_categories,
+                category_scores=moderation.category_scores,
+                error=moderation.error,
+            )
         try:
             shutil.rmtree(sess)
         except Exception:
@@ -1286,4 +1355,8 @@ class UploadCompleteView(APIView):
             'duration': v.duration,
             'width': v.width,
             'height': v.height,
+            'moderation': {
+                'blocked': not moderation.allowed,
+                'message': get_automod_reject_message() if not moderation.allowed else '',
+            },
         }, status=status.HTTP_202_ACCEPTED)

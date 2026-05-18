@@ -4,6 +4,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 from unittest.mock import patch
 
+from apps.configs.utils import set_config
 from apps.interactions.models import Comment
 from apps.videos.models import Video
 
@@ -148,6 +149,18 @@ class FifteenthRoundLogicFixTests(TestCase):
         self.assertFalse(kwargs['reload_required'])
         self.assertEqual(kwargs['version'], resp.data['version'])
 
+    @patch.dict('os.environ', {'COMMENT_BLOCKED_KEYWORDS': ''}, clear=False)
+    def test_admin_config_list_uses_db_value_when_env_string_is_empty(self):
+        set_config('system', 'COMMENT_BLOCKED_KEYWORDS', '给v几百块\n育碧', value_type='string')
+
+        admin_client = self.auth(self.admin)
+        resp = admin_client.get('/api/configs/admin/list/')
+
+        self.assertEqual(resp.status_code, 200)
+        setting = resp.data['content']['settings']['COMMENT_BLOCKED_KEYWORDS']
+        self.assertEqual(setting['value'], '给v几百块\n育碧')
+        self.assertEqual(setting['_source'], 'db')
+
     def test_reviewer_cannot_patch_users_but_admin_can(self):
         reviewer_client = self.auth(self.reviewer)
         resp = reviewer_client.patch(f'/api/admin/users/{self.user_to_manage.id}/', {
@@ -204,9 +217,11 @@ class FifteenthRoundLogicFixTests(TestCase):
 
     @patch('apps.tasks.tasks.transcode_video_to_hls.delay')
     @patch('apps.tasks.tasks.generate_vtt_and_thumbnail.delay')
-    def test_video_delete_and_retry_require_moderator(self, mock_thumb_delay, mock_hls_delay):
+    @patch('apps.tasks.tasks.moderate_video_content.delay')
+    def test_video_delete_and_retry_require_moderator(self, mock_moderation_delay, mock_thumb_delay, mock_hls_delay):
         mock_thumb_delay.return_value.id = 'thumb-task'
         mock_hls_delay.return_value.id = 'hls-task'
+        mock_moderation_delay.return_value.id = 'moderation-task'
         video = self._video(title='round15-video-ops', video_file='videos/round15-video-ops.mp4')
 
         reviewer_client = self.auth(self.reviewer)

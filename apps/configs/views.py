@@ -10,6 +10,11 @@ from dotenv import load_dotenv, find_dotenv
 from apps.adminapi.permissions import IsAdmin
 from apps.configs.utils import invalidate_config_cache
 from backend.system_events import publish_config_updated
+from apps.content.comment_moderation_rules import (
+    COMMENT_PATTERN_RULES,
+    COMMENT_TEXT_CANONICAL_RULES,
+    DEFAULT_COMMENT_BLOCKED_KEYWORDS,
+)
 
 # 加载 .env 文件（如果存在）
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -21,6 +26,8 @@ def get_env_value(key, default=None):
     """从环境变量获取值，支持自动类型转换"""
     value = os.getenv(key)
     if value is None:
+        return default
+    if isinstance(value, str) and value == '':
         return default
     
     # 布尔值转换
@@ -72,6 +79,22 @@ SYSTEM_CONFIG_SCHEMA = {
             'max_upload_size_mb': {'type': 'int', 'label': '最大上传限制(MB)', 'default': 500, 'help': '视频文件最大允许上传大小'},
             'featured_video_ids': {'type': 'string', 'label': '热门推荐视频ID列表', 'default': '', 'help': '每行一个视频ID，按优先级排序'},
             'featured_limit': {'type': 'int', 'label': '热门推荐显示数量', 'default': 10, 'help': '热门推荐区最多显示的视频数量（1-20）'},
+            'AUTO_MODERATION_ENABLED': {'type': 'bool', 'label': '启用自动质控', 'default': True, 'help': '命中文本规则时自动拦截评论并阻止视频进入正常发布流'},
+            'COMMENT_AUTOMOD_ENABLED': {'type': 'bool', 'label': '评论自动质控', 'default': True, 'help': '评论发布前执行敏感词拦截'},
+            'COMMENT_BLOCKED_KEYWORDS': {'type': 'string', 'label': '评论敏感词', 'default': ','.join(DEFAULT_COMMENT_BLOCKED_KEYWORDS), 'help': '逗号或换行分隔，命中后拒绝发表评论；留空时使用系统内置兜底词表'},
+            'COMMENT_CANONICAL_RULES': {'type': 'string', 'label': '评论归一化规则', 'default': '\n'.join(f'{src}={dst}' for src, dst in COMMENT_TEXT_CANONICAL_RULES), 'help': '每行一条，格式为 变体=标准词，例如 草拟吗=操你妈；用于同音字、空格符号绕过归一化'},
+            'COMMENT_PATTERN_RULES': {'type': 'string', 'label': '评论正则规则', 'default': '\n'.join(f'{pattern.pattern}={label}' for pattern, label in COMMENT_PATTERN_RULES), 'help': '每行一条，格式为 正则=标签，例如 n[1i]m[a4]=你妈；用于缩写、字母数字混写等高级匹配'},
+            'VIDEO_AUTOMOD_ENABLED': {'type': 'bool', 'label': '视频自动质控', 'default': True, 'help': '视频标题/描述/文件名发布前执行敏感词拦截'},
+            'VIDEO_BLOCKED_KEYWORDS': {'type': 'string', 'label': '视频敏感词', 'default': '', 'help': '逗号或换行分隔，命中后视频保持草稿并记录审计'},
+            'AUTOMOD_REJECT_MESSAGE': {'type': 'string', 'label': '自动质控提示语', 'default': '内容未通过自动质控，请修改后重试', 'help': '评论或视频命中规则时返回给用户的提示'},
+            'ZHIPU_MODERATION_ENABLED': {'type': 'bool', 'label': '启用智谱AI质控', 'default': True, 'help': '开启后优先调用智谱AI内容安全 API 做真实质控'},
+            'ZHIPU_API_KEY': {'type': 'string', 'label': '智谱AI API Key', 'default': '', 'help': '服务端审核使用，建议通过 .env 配置'},
+            'ZHIPU_BASE_URL': {'type': 'string', 'label': '智谱AI Base URL', 'default': 'https://open.bigmodel.cn/api/paas/v4', 'help': '兼容代理或网关时可覆盖'},
+            'ZHIPU_MODERATION_MODEL': {'type': 'string', 'label': '智谱AI 审核模型', 'default': 'moderation', 'help': '智谱官方内容安全模型'},
+            'ZHIPU_MODERATION_TIMEOUT_SECONDS': {'type': 'int', 'label': '智谱AI 审核超时(秒)', 'default': 15, 'help': '评论和视频文本审核调用超时'},
+            'ZHIPU_MODERATION_FAIL_CLOSED': {'type': 'bool', 'label': '审核故障时拒绝', 'default': False, 'help': '开启后审核服务故障会直接拦截内容'},
+            'ZHIPU_MODERATION_BLOCKED_CATEGORIES': {'type': 'string', 'label': '拦截分类', 'default': 'porn,abuse,violence,contraband,politics,crime', 'help': '逗号分隔，命中这些风险类型则拦截'},
+            'MODERATION_MEDIA_PUBLIC_BASE_URL': {'type': 'string', 'label': '媒体审核公网地址', 'default': '', 'help': '智谱审核图片/视频时需要可公网访问的媒体地址基址，留空时回退到 SITE_URL'},
         }
     },
     # 用户注册/认证
@@ -174,6 +197,36 @@ SYSTEM_CONFIG_SCHEMA = {
 }
 
 ADMIN_OVERRIDE_KEYS = {'SITE_URL', 'FRONTEND_URL'}
+RELOAD_REQUIRED_KEYS = {
+    'SITE_URL',
+    'FRONTEND_URL',
+    'LANGUAGE_CODE',
+    'TIME_ZONE',
+    'EMAIL_BACKEND',
+    'DEFAULT_FROM_EMAIL',
+    'EMAIL_HOST',
+    'EMAIL_PORT',
+    'EMAIL_USE_TLS',
+    'EMAIL_USE_SSL',
+    'EMAIL_TIMEOUT',
+    'REDIS_URL',
+    'REDIS_HOST',
+    'REDIS_PORT',
+    'REDIS_DB',
+    'REDIS_MAX_CONNECTIONS',
+    'CACHE_KEY_PREFIX',
+    'CACHE_DEFAULT_TIMEOUT',
+    'USE_REDIS_CACHE',
+    'CELERY_BROKER_URL',
+    'CELERY_RESULT_BACKEND',
+    'CELERY_TASK_ALWAYS_EAGER',
+    'CELERY_TASK_TIME_LIMIT',
+    'CELERY_TASK_SOFT_TIME_LIMIT',
+}
+
+
+def config_requires_reload(changed_keys):
+    return any(str(key or '') in RELOAD_REQUIRED_KEYS for key in (changed_keys or []))
 
 
 def iter_system_schema_settings():
@@ -304,6 +357,10 @@ class AdminConfigUpdateView(APIView):
             defaults={'value': version}
         )
         invalidate_config_cache('system')
-        publish_config_updated(version=version, changed_keys=updated_keys, reload_required=False)
+        publish_config_updated(
+            version=version,
+            changed_keys=updated_keys,
+            reload_required=config_requires_reload(updated_keys),
+        )
 
         return Response({'status': 'ok', 'updated': updated_keys, 'version': version})

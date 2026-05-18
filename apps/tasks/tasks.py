@@ -12,6 +12,7 @@ from django.utils import timezone
 
 from apps.videos.models import Video
 from apps.configs.utils import get_system_setting
+from apps.content.moderation import log_automod_block, review_video_media
 
 
 def _format_ts(seconds: float) -> str:
@@ -195,6 +196,10 @@ def generate_vtt_and_thumbnail(self, video_id: str) -> dict:
                 f.write(f"{_format_ts(start)} --> {_format_ts(end)}\n")
                 rel_to_vtt = f"{vid_key}_vtt/{name}"
                 f.write(f"{rel_to_vtt}\n\n")
+        try:
+            moderate_video_content.delay(str(v.id))
+        except Exception:
+            pass
         return {'ok': True, 'vtt_rel': vtt_rel, 'meta_updated': True}
     except Exception as e:
         return {'ok': False, 'error': str(e)[:200]}
@@ -314,6 +319,70 @@ def transcode_video_to_hls(self, video_id: str) -> dict:
         error = str(e)[:200]
         _save_transcode_failure(v, error)
         return {'ok': False, 'error': error}
+
+
+@shared_task(bind=True, name='tasks.moderate_video_content')
+def moderate_video_content(self, video_id: str) -> dict:
+    try:
+        video = Video.objects.get(pk=video_id)
+    except Video.DoesNotExist:
+        return {'ok': False, 'error': 'video_not_found'}
+
+    image_paths: list[str] = []
+    thumb_rel = getattr(getattr(video, 'thumbnail_f', None), 'name', None) or getattr(video, 'thumbnail', None) or ''
+    if thumb_rel:
+        thumb_abs = os.path.join(settings.MEDIA_ROOT, str(thumb_rel))
+        if os.path.exists(thumb_abs):
+            image_paths.append(thumb_abs)
+
+    key = _vid_key_from_rel(str(getattr(video, 'video_file', '') or ''))
+    if key:
+        frame_dir = os.path.join(settings.MEDIA_ROOT, 'videos', 'thumbs', f'{key}_vtt')
+        if os.path.isdir(frame_dir):
+            frame_files = sorted(
+                os.path.join(frame_dir, name)
+                for name in os.listdir(frame_dir)
+                if name.endswith('.jpg')
+            )
+            if frame_files:
+                picks = [frame_files[0], frame_files[len(frame_files) // 2], frame_files[-1]]
+                for item in picks:
+                    if item not in image_paths:
+                        image_paths.append(item)
+
+    result = review_video_media(video.title, video.description or '', image_paths, str(getattr(video, 'video_file', '') or ''))
+    if result.allowed:
+        return {'ok': True, 'allowed': True, 'source': result.source}
+
+    fields = ['updated_at']
+    if getattr(video, 'status', None) != 'draft':
+        video.status = 'draft'
+        fields.append('status')
+    if getattr(video, 'published_at', None) is not None:
+        video.published_at = None
+        fields.append('published_at')
+    try:
+        video.save(update_fields=list(dict.fromkeys(fields)))
+    except Exception:
+        pass
+
+    log_automod_block(
+        actor=None,
+        target_type='video',
+        target_id=video.id,
+        scenario='video.media',
+        matched_keywords=result.matched_keywords,
+        source=result.source,
+        flagged_categories=result.flagged_categories,
+        category_scores=result.category_scores,
+        error=result.error,
+    )
+    return {
+        'ok': True,
+        'allowed': False,
+        'source': result.source,
+        'flagged_categories': result.flagged_categories,
+    }
 
 
 @shared_task(name='tasks.cleanup_expired_upload_sessions')

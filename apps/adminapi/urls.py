@@ -21,9 +21,12 @@ urlpatterns = [
     path('comments/<uuid:pk>/', views.AdminCommentDetailView.as_view(), name='comments-detail'),
 
     path('me/', views.AdminMeView.as_view(), name='me'),
+    path('moderation/check/', views.AdminModerationHealthCheckView.as_view(), name='moderation-check'),
 
     # Audit logs
     path('audit-logs/', views.AdminAuditLogsListView.as_view(), name='audit-logs-list'),
+    path('audit-logs/automod-summary/', views.AdminAuditLogsAutomodSummaryView.as_view(), name='audit-logs-automod-summary'),
+    path('audit-logs/automod-rules/apply/', views.AdminAutomodRuleApplyView.as_view(), name='audit-logs-automod-rules-apply'),
 
     # Categories
     path('categories/', views.AdminCategoriesListView.as_view(), name='categories-list'),
