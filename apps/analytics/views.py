@@ -65,19 +65,3 @@ class EventsIngestView(APIView):
 
         # 返回 204 更简单；为便于诊断，这里返回处理条数
         return Response({'updated': updated}, status=status.HTTP_200_OK)
-
-"""Analytics 视图模块。
-
-用于实现埋点/统计相关的 API 视图，例如事件上报、指标查询等。
-后续可结合 DRF 的 APIView/ViewSet 来定义接口，并在 urls 中进行路由绑定。
-"""
-
-from django.shortcuts import render
-
-# 在此编写视图，例如：
-# from rest_framework.views import APIView
-# from rest_framework.response import Response
-#
-# class HealthView(APIView):
-#     def get(self, request):
-#         return Response({"status": "ok"})
